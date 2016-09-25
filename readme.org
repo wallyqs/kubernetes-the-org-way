@@ -8,7 +8,7 @@ Currently covered:
 - [[./org/01-infra.org][Setting up the infra]]
 - [[./org/02-certificate-authority.org][Setting up certificates]]
 - [[./org/03-etcd.org][Setting up a etcd 3 nodes quorum]]
-- [[./org/04-kubernetes-controller.org][Setting up the Controllers]]
+- [[./org/04-kubernetes-controller.org][Setting up the controllers]]
 - [[./org/05-kubernetes-worker.org][Setting up the worker nodes]]
 - [[./org/06-kubectl.org][Configuring kubectl]]
 - [[./org/07-networking.org][Configuring the network]]

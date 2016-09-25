@@ -1,0 +1,663 @@
+# -*- mode: org; mode: auto-fill -*-
+#+title: Bootstrapping an HA Kubernetes Control Plane
+#+startup: showeverything
+#+property: header-args :results output code
+
+*** Instances
+
+#+BEGIN_SRC sh :exports both
+gcloud compute instances list
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+NAME         ZONE           MACHINE_TYPE   PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP   STATUS
+controller0  us-central1-a  n1-standard-1               10.240.0.20  AAA.BBB.CCC.1   RUNNING
+controller1  us-central1-a  n1-standard-1               10.240.0.21  AAA.BBB.CCC.2   RUNNING
+etcd0        us-central1-a  n1-standard-1               10.240.0.10  AAA.BBB.CCC.3   RUNNING
+etcd1        us-central1-a  n1-standard-1               10.240.0.11  AAA.BBB.CCC.4   RUNNING
+etcd2        us-central1-a  n1-standard-1               10.240.0.12  AAA.BBB.CCC.5   RUNNING
+worker0      us-central1-a  n1-standard-1               10.240.0.30  AAA.BBB.CCC.6   RUNNING
+worker1      us-central1-a  n1-standard-1               10.240.0.31  AAA.BBB.CCC.7   RUNNING
+worker2      us-central1-a  n1-standard-1               10.240.0.32  AAA.BBB.CCC.8   RUNNING
+#+END_SRC
+
+In order to be able to talk to the control plane externally to the
+cluster, we will be also using a Google Compute engine Load Balancer
+which will then provide a public ip.
+
+*** About the Management/Controller node
+
+#+BEGIN_QUOTE
+The Kubernetes components that make up the control plane include the following components:
+
+- Kubernetes API Server
+- Kubernetes Scheduler
+- Kubernetes Controller Manager
+
+Each component is being run on the same machines for the following reasons:
+
+- The Scheduler and Controller Manager are tightly coupled with the API Server
+
+- Only one Scheduler and Controller Manager can be active at a given
+  time, but it's ok to run multiple at the same time. Each component
+  will elect a leader via the API Server.
+
+- Running multiple copies of each component is required for H/A
+
+- Running each component next to the API Server eases configuration.
+#+END_QUOTE
+
+*** Provisioning of management nodes
+
+**** controller0
+  :properties:
+  :header-args: :dir /ssh:controller0.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+- [X] Docker
+- [X] Kubernetes API Server
+- [X] Kubernetes Controller Manager
+- [X] Kubernetes Scheduler
+
+***** DONE Confirm ip and presence of certificates:
+
+#+BEGIN_SRC sh :exports both
+ip a
+ls *.pem
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:14 brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.20/32 brd 10.240.0.20 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:14/64 scope link 
+       valid_lft forever preferred_lft forever
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
+    link/ether 02:42:7e:c1:aa:c4 brd ff:ff:ff:ff:ff:ff
+    inet 172.17.0.1/16 scope global docker0
+       valid_lft forever preferred_lft forever
+ca.pem	kubernetes-key.pem  kubernetes.pem
+#+end_example
+
+Copy the certificates
+
+#+BEGIN_SRC sh :exports both
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
+#+END_SRC
+
+***** DONE Create the kubernetes folder and copy the certificates which were uploaded
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubernetes
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
+#+END_SRC
+
+***** DONE Fetch the kubernetes binaries and put them in path
+
+#+BEGIN_SRC sh 
+wget https://storage.googleapis.com/kubernetes-release/release/v1.3.0/bin/linux/amd64/kube-apiserver
+wget https://storage.googleapis.com/kubernetes-release/release/v1.3.0/bin/linux/amd64/kube-controller-manager
+wget https://storage.googleapis.com/kubernetes-release/release/v1.3.0/bin/linux/amd64/kube-scheduler
+wget https://storage.googleapis.com/kubernetes-release/release/v1.3.0/bin/linux/amd64/kubectl
+#+END_SRC
+
+Confirm and change permissions
+
+#+BEGIN_SRC sh
+ls kube*
+chmod +x kube-apiserver kube-controller-manager kube-scheduler kubectl
+#+END_SRC
+
+Add to path:
+
+#+BEGIN_SRC sh
+sudo cp kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/bin/
+#+END_SRC
+
+***** DONE Docker 1.11
+
+# TODO: Is this needed?
+
+Have tried with 1.12 and seems ok though using 1.11 here just in case:
+
+#+BEGIN_QUOTE
+Kubernetes should be compatible with the Docker 1.9.x - 1.11.x:
+#+END_QUOTE
+
+****** Fetch Docker
+
+#+BEGIN_SRC sh
+wget https://get.docker.com/builds/Linux/x86_64/docker-1.11.2.tgz
+#+END_SRC
+
+#+BEGIN_SRC sh
+tar -xvf docker-1.11.2.tgz
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp docker/docker* /usr/bin/
+#+END_SRC
+
+****** Systemd init
+
+Docker service to manage the daemon:
+
+#+BEGIN_SRC sh :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/docker.service
+[Unit]
+Description=Docker Application Container Engine
+Documentation=http://docs.docker.io
+
+[Service]
+ExecStart=/usr/bin/docker daemon \
+  --iptables=false \
+  --ip-masq=false \
+  --host=unix:///var/run/docker.sock \
+  --log-level=error \
+  --storage-driver=overlay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/docker.service /etc/systemd/system/docker.service
+#+END_SRC
+
+Reload and confirm that docker starts:
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable docker
+sudo systemctl start docker
+#+END_SRC
+
+Smoke test that the Docker Daemon is running:
+
+#+BEGIN_SRC sh
+sudo docker version
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Client:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+
+Server:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+#+end_example
+
+***** DONE Kubernetes API Server
+
+****** TODO Token Credentials
+
+Using Token based authentication to limit access to the cluster:
+http://kubernetes.io/docs/admin/authentication/
+
+- Service Accounts managed by Kubernetes
+- Normal users
+
+#+BEGIN_SRC text :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/token.csv
+secreto,admin,admin
+secreto,scheduler,scheduler
+secreto,kubelet,kubelet
+#+END_SRC
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/token.csv /var/lib/kubernetes/
+#+END_SRC
+
+Confirm:
+
+#+BEGIN_SRC sh :exports both
+cat /var/lib/kubernetes/token.csv
+#+END_SRC
+
+#+RESULTS:
+: secreto,admin,admin
+: secreto,scheduler,scheduler
+: secreto,kubelet,kubelet
+
+****** TODO Authorization (=kind: Policy=)
+
+#+BEGIN_QUOTE
+Attribute-Based Access Control (ABAC) will be used to authorize access to the Kubernetes API.
+#+END_QUOTE
+
+Match on the API group [[https://github.com/kubernetes/kubernetes/blob/7457166290b636d08e01c45baf8e7ecc7744755b/pkg/apis/abac/register.go#L26][abac.authorization.kubernetes.io/v1beta1]],
+a payload of =Policy= [[https://github.com/kubernetes/kubernetes/blob/f2ddd60eb9e7e9e29f7a105a9a8fa020042e8e52/pkg/apis/abac/types.go#L30][kind]] so that any user 
+
+#+BEGIN_SRC js :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/authorization-policy.jsonl
+{"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"*", "nonResourcePath": "*", "readonly": true}}
+#+END_SRC
+
+=admin= user has permissions on any =namespace= and on any =resource= and on any group of =apis=.
+
+#+BEGIN_SRC js :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/authorization-policy.jsonl
+{"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"admin", "namespace": "*", "resource": "*", "apiGroup": "*"}}
+#+END_SRC
+
+=scheduler= user has permissions on any =namespace= and on any =resource= and on any group of =apis=.
+
+#+BEGIN_SRC js :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/authorization-policy.jsonl
+{"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"scheduler", "namespace": "*", "resource": "*", "apiGroup": "*"}}
+#+END_SRC
+
+=kubelet= user has permissions on any =namespace= and on any =resource= and on any group of =apis=.
+
+#+BEGIN_SRC js :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/authorization-policy.jsonl
+{"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"kubelet", "namespace": "*", "resource": "*", "apiGroup": "*"}}
+#+END_SRC
+
+There is a group of =system:serviceaccounts= which will have access to
+the any =namespace= and on any =resource= or group of =apis= and on
+the =nonResourcePath=
+
+#+BEGIN_SRC js :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/authorization-policy.jsonl
+{"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"group":"system:serviceaccounts", "namespace": "*", "resource": "*", "apiGroup": "*", "nonResourcePath": "*"}}
+#+END_SRC
+
+Copy the =kind: Policy= pieces onto the =kubernetes= folder:
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/authorization-policy.jsonl /var/lib/kubernetes/
+#+END_SRC
+
+****** TODO Create the systemd unit file
+
+#+BEGIN_SRC sh :exports both
+curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip
+#+END_SRC
+
+#+RESULTS:
+: 10.240.0.20
+
+Set the =--advertise-address= that the API server should be using explicitly.
+
+#+BEGIN_SRC conf :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-apiserver \
+  --admission-control=NamespaceLifecycle,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota \
+  --advertise-address=10.240.0.20 \
+  --allow-privileged=true \
+  --apiserver-count=3 \
+  --authorization-mode=ABAC \
+  --authorization-policy-file=/var/lib/kubernetes/authorization-policy.jsonl \
+  --bind-address=0.0.0.0 \
+  --enable-swagger-ui=true \
+  --etcd-cafile=/var/lib/kubernetes/ca.pem \
+  --insecure-bind-address=0.0.0.0 \
+  --kubelet-certificate-authority=/var/lib/kubernetes/ca.pem \
+  --etcd-servers=https://10.240.0.10:2379,https://10.240.0.11:2379,https://10.240.0.12:2379 \
+  --service-account-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --service-cluster-ip-range=10.32.0.0/24 \
+  --service-node-port-range=30000-32767 \
+  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \
+  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --token-auth-file=/var/lib/kubernetes/token.csv \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+Configure =systemd= to use it:
+
+#+BEGIN_SRC sh :exports both
+sudo cp /tmp/kube-apiserver.service /etc/systemd/system/
+ls /etc/systemd/system/
+head /etc/systemd/system/kube-apiserver.service
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+cloud-init.target.wants  kube-apiserver.service       sshd.service
+default.target.wants	 multi-user.target.wants      sshd.service.wants
+docker.service		 network-online.target.wants  sysinit.target.wants
+getty.target.wants	 paths.target.wants	      syslog.service
+graphical.target.wants	 shutdown.target.wants	      timers.target.wants
+iscsi.service		 sockets.target.wants
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-apiserver \
+  --admission-control=NamespaceLifecycle,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota \
+  --advertise-address=10.240.0.20 \
+  --allow-privileged=true \
+  --apiserver-count=3 \
+#+end_example
+
+Reload systemd
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-apiserver
+sudo systemctl start kube-apiserver
+#+END_SRC
+
+Confirm that the API server is running:
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-apiserver --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-apiserver.service - Kubernetes API Server
+   Loaded: loaded (/etc/systemd/system/kube-apiserver.service; enabled; vendor preset: enabled)
+   Active: active (running) since Tue 2016-09-13 18:22:40 UTC; 5min ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 13534 (kube-apiserver)
+   CGroup: /system.slice/kube-apiserver.service
+           └─13534 /usr/bin/kube-apiserver --admission-control=NamespaceLifec...
+
+Sep 13 18:22:41 controller0 kube-apiserver[13534]: [restful] 2016/09/13 18:22...
+Sep 13 18:22:41 controller0 kube-apiserver[13534]: [restful] 2016/09/13 18:22...
+Sep 13 18:22:41 controller0 kube-apiserver[13534]: I0913 18:22:41.261023   13...
+Sep 13 18:22:41 controller0 kube-apiserver[13534]: I0913 18:22:41.261268   13...
+Sep 13 18:22:42 controller0 kube-apiserver[13534]: I0913 18:22:42.104962   13...
+Sep 13 18:22:42 controller0 kube-apiserver[13534]: I0913 18:22:42.106513   13…2]
+Sep 13 18:22:42 controller0 kube-apiserver[13534]: I0913 18:22:42.107333   13…4]
+Sep 13 18:22:42 controller0 kube-apiserver[13534]: I0913 18:22:42.108079   13…6]
+Sep 13 18:22:42 controller0 kube-apiserver[13534]: I0913 18:22:42.108847   13…8]
+Sep 13 18:28:22 controller0 systemd[1]: Started Kubernetes API Server.
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+Or checking the logs with =journald=
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kube-apiserver -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:01:09 UTC, end at Tue 2016-09-13 18:31:55 UTC. --
+Sep 13 18:28:53 controller0 kube-apiserver[13882]: E0913 18:28:53.313719   13882 reflector.go:216] k8s.io/kubernetes/plugin/pkg/admission/serviceaccount/admission.go:103: Failed to list *api.ServiceAccount: Get http://0.0.0.0:8080/api/v1/serviceaccounts?resourceVersion=0: dial tcp 0.0.0.0:8080: getsockopt: connection refused
+Sep 13 18:28:53 controller0 kube-apiserver[13882]: [restful] 2016/09/13 18:28:53 log.go:30: [restful/swagger] listing is available at https://10.240.0.20:6443/swaggerapi/
+Sep 13 18:28:53 controller0 kube-apiserver[13882]: [restful] 2016/09/13 18:28:53 log.go:30: [restful/swagger] https://10.240.0.20:6443/swaggerui/ is mapped to folder /swagger-ui/
+Sep 13 18:28:53 controller0 kube-apiserver[13882]: I0913 18:28:53.445521   13882 genericapiserver.go:690] Serving securely on 0.0.0.0:6443
+Sep 13 18:28:53 controller0 kube-apiserver[13882]: I0913 18:28:53.445766   13882 genericapiserver.go:734] Serving insecurely on 0.0.0.0:8080
+Sep 13 18:28:54 controller0 kube-apiserver[13882]: I0913 18:28:54.314833   13882 handlers.go:165] GET /api/v1/resourcequotas?resourceVersion=0: (673.828µs) 200 [[kube-apiserver/v1.3.0 (linux/amd64) kubernetes/2831379] 127.0.0.1:46300]
+Sep 13 18:28:54 controller0 kube-apiserver[13882]: I0913 18:28:54.316317   13882 handlers.go:165] GET /api/v1/namespaces?resourceVersion=0: (348.001µs) 200 [[kube-apiserver/v1.3.0 (linux/amd64) kubernetes/2831379] 127.0.0.1:46296]
+Sep 13 18:28:54 controller0 kube-apiserver[13882]: I0913 18:28:54.317064   13882 handlers.go:165] GET /api/v1/limitranges?resourceVersion=0: (386.668µs) 200 [[kube-apiserver/v1.3.0 (linux/amd64) kubernetes/2831379] 127.0.0.1:46298]
+Sep 13 18:28:54 controller0 kube-apiserver[13882]: I0913 18:28:54.319564   13882 handlers.go:165] GET /api/v1/secrets?fieldSelector=type%3Dkubernetes.io%2Fservice-account-token&resourceVersion=0: (352.744µs) 200 [[kube-apiserver/v1.3.0 (linux/amd64) kubernetes/2831379] 127.0.0.1:46304]
+Sep 13 18:28:54 controller0 kube-apiserver[13882]: I0913 18:28:54.321152   13882 handlers.go:165] GET /api/v1/serviceaccounts?resourceVersion=0: (270.987µs) 200 [[kube-apiserver/v1.3.0 (linux/amd64) kubernetes/2831379] 127.0.0.1:46298]
+#+end_example
+
+***** TODO Kubernetes Controller Manager
+
+****** systemd file
+
+As the master =API Server=, it will be set the =ip:port= from the API
+server which is colocated to this Controller Manager.
+
+#+BEGIN_SRC conf :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/kube-controller-manager.service
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-controller-manager \
+  --allocate-node-cidrs=true \
+  --cluster-cidr=10.200.0.0/16 \
+  --cluster-name=kubernetes \
+  --leader-elect=true \
+  --master=http://10.240.0.20:8080 \
+  --root-ca-file=/var/lib/kubernetes/ca.pem \
+  --service-account-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --service-cluster-ip-range=10.32.0.0/24 \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+Copy the systemd file:
+
+#+BEGIN_SRC sh
+sudo cp /tmp/kube-controller-manager.service /etc/systemd/system
+#+END_SRC
+
+Reload the systemd daemon:
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-controller-manager
+sudo systemctl start  kube-controller-manager
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-controller-manager --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-controller-manager.service - Kubernetes Controller Manager
+   Loaded: loaded (/etc/systemd/system/kube-controller-manager.service; enabled; vendor preset: enabled)
+   Active: active (running) since Tue 2016-09-13 18:43:25 UTC; 1min 17s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 14654 (kube-controller)
+    Tasks: 5
+   Memory: 13.0M
+      CPU: 271ms
+   CGroup: /system.slice/kube-controller-manager.service
+           └─14654 /usr/bin/kube-controller-manager --allocate-node-cidrs=tru...
+
+Sep 13 18:43:55 controller0 kube-controller-manager[14654]: I0913 18:43:55.87...
+Sep 13 18:44:00 controller0 kube-controller-manager[14654]: I0913 18:44:00.87...
+Sep 13 18:44:05 controller0 kube-controller-manager[14654]: I0913 18:44:05.88...
+Sep 13 18:44:10 controller0 kube-controller-manager[14654]: I0913 18:44:10.88...
+Sep 13 18:44:15 controller0 kube-controller-manager[14654]: I0913 18:44:15.88...
+Sep 13 18:44:20 controller0 kube-controller-manager[14654]: I0913 18:44:20.89...
+Sep 13 18:44:25 controller0 kube-controller-manager[14654]: I0913 18:44:25.89...
+Sep 13 18:44:30 controller0 kube-controller-manager[14654]: I0913 18:44:30.89...
+Sep 13 18:44:35 controller0 kube-controller-manager[14654]: I0913 18:44:35.89...
+Sep 13 18:44:40 controller0 kube-controller-manager[14654]: I0913 18:44:40.90...
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+Or checking the logs with =journald=
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kube-controller-manager -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:01:09 UTC, end at Tue 2016-09-13 18:45:10 UTC. --
+Sep 13 18:44:20 controller0 kube-controller-manager[14654]: I0913 18:44:20.890382   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:25 controller0 kube-controller-manager[14654]: I0913 18:44:25.893459   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:30 controller0 kube-controller-manager[14654]: I0913 18:44:30.896481   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:35 controller0 kube-controller-manager[14654]: I0913 18:44:35.899319   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:40 controller0 kube-controller-manager[14654]: I0913 18:44:40.902347   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:45 controller0 kube-controller-manager[14654]: I0913 18:44:45.905233   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:50 controller0 kube-controller-manager[14654]: I0913 18:44:50.908281   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:44:55 controller0 kube-controller-manager[14654]: I0913 18:44:55.911139   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:45:00 controller0 kube-controller-manager[14654]: I0913 18:45:00.914100   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+Sep 13 18:45:05 controller0 kube-controller-manager[14654]: I0913 18:45:05.917225   14654 nodecontroller.go:665] NodeController is entering network segmentation mode.
+#+end_example
+
+***** DONE Kubernetes Scheduler
+
+****** systemd file
+
+#+BEGIN_SRC conf :tangle /ssh:controller0.us-central1-a.EXAMPLE-99999:/tmp/kube-scheduler.service
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-scheduler \
+  --leader-elect=true \
+  --master=http://10.240.0.20:8080 \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp /tmp/kube-scheduler.service /etc/systemd/system
+#+END_SRC
+
+Reload the systemd daemon:
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-scheduler
+sudo systemctl start  kube-scheduler
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-scheduler --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-scheduler.service - Kubernetes Scheduler
+   Loaded: loaded (/etc/systemd/system/kube-scheduler.service; enabled; vendor preset: enabled)
+   Active: active (running) since Tue 2016-09-13 18:48:45 UTC; 4s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 15047 (kube-scheduler)
+    Tasks: 4
+   Memory: 4.7M
+      CPU: 29ms
+   CGroup: /system.slice/kube-scheduler.service
+           └─15047 /usr/bin/kube-scheduler --leader-elect=true --master=http:...
+
+Sep 13 18:48:45 controller0 systemd[1]: Started Kubernetes Scheduler.
+Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.096693   15...
+Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.097134   15...
+Sep 13 18:48:45 controller0 kube-scheduler[15047]: E0913 18:48:45.125024   15...
+Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.126418   15...
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+Or checking the logs with =journald=
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kube-scheduler -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+: -- Logs begin at Thu 2016-09-08 01:01:09 UTC, end at Tue 2016-09-13 18:49:27 UTC. --
+: Sep 13 18:48:45 controller0 systemd[1]: Started Kubernetes Scheduler.
+: Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.096693   15047 factory.go:255] Creating scheduler from algorithm provider 'DefaultProvider'
+: Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.097134   15047 factory.go:301] creating scheduler with fit predicates 'map[NoVolumeZoneConflict:{} MaxEBSVolumeCount:{} MaxGCEPDVolumeCount:{} GeneralPredicates:{} PodToleratesNodeTaints:{} CheckNodeMemoryPressure:{} NoDiskConflict:{}]' and priority functions 'map[SelectorSpreadPriority:{} NodeAffinityPriority:{} TaintTolerationPriority:{} LeastRequestedPriority:{} BalancedResourceAllocation:{}]
+: Sep 13 18:48:45 controller0 kube-scheduler[15047]: E0913 18:48:45.125024   15047 event.go:257] Could not construct reference to: '&api.Endpoints{TypeMeta:unversioned.TypeMeta{Kind:"", APIVersion:""}, ObjectMeta:api.ObjectMeta{Name:"kube-scheduler", GenerateName:"", Namespace:"kube-system", SelfLink:"", UID:"", ResourceVersion:"", Generation:0, CreationTimestamp:unversioned.Time{Time:time.Time{sec:0, nsec:0, loc:(*time.Location)(nil)}}, DeletionTimestamp:(*unversioned.Time)(nil), DeletionGracePeriodSeconds:(*int64)(nil), Labels:map[string]string(nil), Annotations:map[string]string(nil), OwnerReferences:[]api.OwnerReference(nil), Finalizers:[]string(nil)}, Subsets:[]api.EndpointSubset(nil)}' due to: 'selfLink was empty, can't make reference'. Will not report event: 'Normal' '%v became leader' 'controller0'
+: Sep 13 18:48:45 controller0 kube-scheduler[15047]: I0913 18:48:45.126418   15047 leaderelection.go:215] sucessfully acquired lease kube-system/kube-scheduler
+
+*** Setting up the API Servers public Load Balancer
+
+***** Create the health check which will be putting them in rotation.
+
+#+BEGIN_SRC sh :exports both
+gcloud compute http-health-checks create kube-apiserver-check \
+  --description "Kubernetes API Server Health Check" \
+  --port 8080 \
+  --request-path /healthz
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Created [https://www.googleapis.com/compute/v1/projects/EXAMPLE-99999/global/httpHealthChecks/kube-apiserver-check].
+NAME                  HOST  PORT  REQUEST_PATH
+kube-apiserver-check        8080  /healthz
+#+END_EXAMPLE
+
+***** Setup target pool of API servers which will be load balanced
+
+#+BEGIN_SRC sh :exports both
+gcloud compute target-pools create kubernetes-pool \
+  --health-check kube-apiserver-check \
+  --region us-central1
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+NAME             REGION       SESSION_AFFINITY  BACKUP  HEALTH_CHECKS
+kubernetes-pool  us-central1                            kube-apiserver-check
+#+END_SRC
+
+***** Add API server nodes so that they receive requests from load balancer
+
+#+BEGIN_SRC sh
+gcloud compute target-pools add-instances kubernetes-pool \
+  --instances controller0 \
+  --zone us-central1-a
+#+END_SRC
+
+***** Get the public IP that the load balancer will be using
+
+#+BEGIN_SRC sh :exports both
+gcloud compute addresses describe kubernetes \
+  --format 'value(address)' \
+  --region us-central1
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+AAA.BBB.CCC.100
+#+END_SRC
+
+***** Enable firewall forwarding
+
+On port =6443= because on which the API Server is binding to receive
+requests securely (insecure port is =8080=).
+
+#+BEGIN_SRC sh :exports both
+gcloud compute forwarding-rules create kubernetes-rule --region us-central1 \
+  --address AAA.BBB.CCC.100 \
+  --ports 6443 \
+  --target-pool kubernetes-pool
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+---
+IPAddress: AAA.BBB.CCC.100
+IPProtocol: TCP
+kind: compute#forwardingRule
+name: kubernetes-rule
+portRange: 6443-6443
+region: us-central1
+selfLink: https://www.googleapis.com/compute/v1/projects/EXAMPLE-99999/regions/us-central1/forwardingRules/kubernetes-rule
+target: us-central1/targetPools/kubernetes-pool
+#+END_SRC

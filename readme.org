@@ -1,0 +1,20 @@
+# -*- mode: org; mode: auto-fill -*-
+#+TITLE: Kubernetes The Org Way
+
+An Org mode based interpretation of the excellent [[https://github.com/kelseyhightower/kubernetes-the-hard-way][Kubernetes The Hard Way]] guide from Kelsey Hightower.
+
+Currently covered:
+
+- [[./org/01-infra.org][Setting up the infra]]
+- [[./org/02-certificate-authority.org][Setting up certificates]]
+- [[./org/03-etcd.org][Setting up a etcd 3 nodes quorum]]
+- [[./org/04-kubernetes-controller.org][Setting up the Controllers]]
+- [[./org/05-kubernetes-worker.org][Setting up the worker nodes]]
+- [[./org/06-kubectl.org][Configuring kubectl]]
+- [[./org/07-networking.org][Configuring the network]]
+- [[./org/08-dns-addon.org][Configuring the DNS add on]]
+- [[./org/09-smoke-test.org][Basic smoke test with nginx app]]
+
+Check [[setup.org][setup.org]] for requirements, then on each document
+call =M-x org-babel-tangle= for tangling and executing each one of the
+blocks remotely on the Kubernetes cluster.

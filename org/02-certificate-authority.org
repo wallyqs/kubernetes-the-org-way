@@ -1,0 +1,179 @@
+#+TITLE: Certificate Authority
+
+** Setup
+
+*** Installing CFSSL
+
+#+BEGIN_SRC sh
+wget https://pkg.cfssl.org/R1.2/cfssl_darwin-amd64
+chmod +x cfssl_darwin-amd64
+sudo mv cfssl_darwin-amd64 /usr/local/bin/cfssl
+#+END_SRC
+
+*** Create the CA configuration file
+
+#+BEGIN_SRC sh :tangle files/ca-config.json :mkdirp true
+{
+  "signing": {
+    "default": {
+      "expiry": "8760h"
+    },
+    "profiles": {
+      "kubernetes": {
+        "usages": ["signing", "key encipherment", "server auth", "client auth"],
+        "expiry": "8760h"
+      }
+    }
+  }
+}
+#+END_SRC
+
+*** Generate the CA certificate and private key
+
+#+BEGIN_SRC js :tangle files/ca-csr.json
+{
+  "CN": "Kubernetes",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "US",
+      "L": "Portland",
+      "O": "Kubernetes",
+      "OU": "CA",
+      "ST": "Oregon"
+    }
+  ]
+}
+#+END_SRC
+
+Generate the CA certificate and private key:
+
+#+BEGIN_SRC sh :dir files :results output
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+ls
+head -n 1 * 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+ca-config.json
+ca-csr.json
+ca-key.pem
+ca.csr
+ca.pem
+==> ca-config.json <==
+{
+
+==> ca-csr.json <==
+{
+
+==> ca-key.pem <==
+-----BEGIN RSA PRIVATE KEY-----
+
+==> ca.csr <==
+-----BEGIN CERTIFICATE REQUEST-----
+
+==> ca.pem <==
+-----BEGIN CERTIFICATE-----
+#+end_example
+
+Verification:
+
+#+BEGIN_SRC sh :dir files :results output
+openssl x509 -in ca.pem -text -noout
+#+END_SRC
+
+** Generate the single Kubernetes TLS Cert
+
+#+BEGIN_QUOTE
+In this section we will generate a TLS certificate that will be valid
+for all Kubernetes components. This is being done for ease of use. In
+production you should strongly consider generating individual TLS
+certificates for each component.
+#+END_QUOTE
+
+Get the kubernetes public ip:
+
+#+BEGIN_SRC sh :results output code
+gcloud compute addresses describe kubernetes --region us-central1 --format 'value(address)'
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+AAA.BBB.CCC.100
+#+END_SRC
+
+Create the =kubernetes-csr.json= file with the list of hosts involved in the cluster,
+as well as the public ip from the cluster:
+
+#+BEGIN_SRC js :tangle files/kubernetes-csr.json
+{
+  "CN": "kubernetes",
+  "hosts": [
+    "worker0",
+    "worker1",
+    "worker2",
+    "10.32.0.1",
+    "10.240.0.10",
+    "10.240.0.11",
+    "10.240.0.12",
+    "10.240.0.20",
+    "10.240.0.21",
+    "10.240.0.22",
+    "10.240.0.30",
+    "10.240.0.31",
+    "10.240.0.32",
+    "AAA.BBB.CCC.100",
+    "127.0.0.1"
+  ],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "US",
+      "L": "Portland",
+      "O": "Kubernetes",
+      "OU": "Cluster",
+      "ST": "Oregon"
+    }
+  ]
+}
+#+END_SRC
+
+Generate the Kubernetes certificate and private key:
+
+#+BEGIN_SRC sh :results output :dir files
+cfssl gencert \
+  -ca=ca.pem \
+  -ca-key=ca-key.pem \
+  -config=ca-config.json \
+  -profile=kubernetes \
+  kubernetes-csr.json | cfssljson -bare kubernetes
+#+END_SRC
+
+#+RESULTS:
+
+Verification:
+
+#+BEGIN_SRC sh :results output :dir files
+openssl x509 -in kubernetes.pem -text -noout
+#+END_SRC
+
+** Copy the TLS certs
+
+#+BEGIN_SRC sh :dir files
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem controller0:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem controller1:~/ --zone us-central1-a
+# gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem controller2:~/
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem etcd0:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem etcd1:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem etcd2:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem worker0:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem worker1:~/ --zone us-central1-a
+gcloud compute copy-files ca.pem kubernetes-key.pem kubernetes.pem worker2:~/ --zone us-central1-a
+#+END_SRC

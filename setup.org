@@ -1,0 +1,74 @@
+#+title:	Setup
+#+startup:	showeverything
+
+*** gcloud tool
+
+- Installing the gcloud tool
+
+https://cloud.google.com/sdk/downloads
+
+#+BEGIN_SRC sh
+mkdir src
+cd src
+curl -O -L https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-125.0.0-darwin-x86_64.tar.gz
+tar -xvf google-cloud-sdk-125.0.0-darwin-x86_64.tar.gz
+./google-cloud-sdk/install.sh
+./google-cloud-sdk/bin/gcloud init
+#+END_SRC
+
+- Optionally update the components from the sdk
+
+: gcloud components update
+
+*** GCE Dashboard for the project
+
+- Need to enable a project to be used throughout the guide
+
+https://console.cloud.google.com/home/dashboard?project=EXAMPLE-99999
+
+*** gcloud cli
+
+Enable the API
+
+#+BEGIN_SRC sh
+ ./google-cloud-sdk/bin/gcloud compute instances list
+ERROR: (gcloud.compute.instances.list) Some requests did not succeed:
+
+ - Access Not Configured. Compute Engine API has not been used in project _____ before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/compute_component/overview?project=_________ then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+#+END_SRC
+
+*** Setup SSH for Org Babel
+
+#+BEGIN_SRC sh
+gcloud compute config-ssh
+#+END_SRC
+
+*** How to SSH
+
+Refer to the config ssh guide to know how to ssh to your nodes:
+https://cloud.google.com/sdk/gcloud/reference/compute/config-ssh
+
+Given that the name of the project is =yourproject-12345=
+then you would be able to use an Org Babel code block with a header
+args =:dir= such as the following to be able to execute them remotely:
+
+#+BEGIN_SRC 
+:dir /ssh:etcd0.us-central1-a.yourproject-12345: :results output
+#+END_SRC
+
+*** COMMENT Add the gcloud tool to the path
+
+#+BEGIN_SRC sh
+(setenv "PATH" (concat (getenv "PATH") ":" default-directory "src/google-cloud-sdk/bin/"))
+#+END_SRC
+
+*** Modify code blocks to use project
+
+Replace the templated Org mode files to use the name ofr your GCE
+project so that remote tangle works:
+
+#+BEGIN_SRC sh
+for f in `ls org/*.org`; do 
+  sed -i '' "s/EXAMPLE-99999/YOURPROJECT-12345//" $f
+done
+#+END_SRC

@@ -1,0 +1,242 @@
+# -*- mode: org; mode: auto-fill -*-
+#+title:        Smoke test
+#+startup:      showeverything
+
+** Nginx
+
+*** Create Nginx
+
+Create a Nginx pod from the =nginx= docker image exposing the port 80 and set it to have 3 replicas.
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl run nginx --image=nginx --port=80 --replicas=3
+#+END_SRC
+
+#+RESULTS:
+: deployment "nginx" created
+
+**** Confirm
+
+#+BEGIN_SRC sh :results output :exports both
+echo '--- default'
+kubectl get svc,pods,deployments,nodes -o wide
+
+echo 
+echo '--- kube-system'
+kubectl get svc,pods,deployments,nodes -o wide --namespace kube-system
+echo 
+echo 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+--- default
+NAME                     CLUSTER-IP   EXTERNAL-IP   PORT(S)      AGE         SELECTOR
+kubernetes               10.32.0.1    <none>        443/TCP      9d          <none>
+NAME                     READY        STATUS        RESTARTS     AGE         IP           NODE
+nginx-2032906785-2esi5   1/1          Running       0            2m          10.200.2.3   worker2
+nginx-2032906785-q3rk3   1/1          Running       0            2m          10.200.1.2   worker1
+nginx-2032906785-zdaob   1/1          Running       0            2m          10.200.0.3   worker0
+NAME                     DESIRED      CURRENT       UP-TO-DATE   AVAILABLE   AGE
+nginx                    3            3             3            3           2m
+NAME                     STATUS       AGE
+worker0                  Ready        9d
+worker1                  Ready        3d
+worker2                  Ready        3d
+
+
+--- kube-system
+NAME                           CLUSTER-IP   EXTERNAL-IP   PORT(S)         AGE         SELECTOR
+kube-dns                       10.32.0.10   <none>        53/UDP,53/TCP   19h         k8s-app=kube-dns
+NAME                           READY        STATUS        RESTARTS        AGE         IP           NODE
+kube-dns-v19-965658604-11x0e   3/3          Running       0               18h         10.200.0.2   worker0
+kube-dns-v19-965658604-qewo9   3/3          Running       0               18h         10.200.2.2   worker2
+NAME                           DESIRED      CURRENT       UP-TO-DATE      AVAILABLE   AGE
+kube-dns-v19                   2            2             2               2           18h
+NAME                           STATUS       AGE
+worker0                        Ready        9d
+worker1                        Ready        3d
+worker2                        Ready        3d
+
+
+#+end_example
+
+*** Expose Nginx as NodePort
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl expose deployment nginx --type NodePort
+#+END_SRC
+
+#+RESULTS:
+: service "nginx" exposed
+
+#+BEGIN_QUOTE
+Note that --type=LoadBalancer will not work because we did not
+configure a cloud provider when bootstrapping this cluster.
+#+END_QUOTE
+
+**** Confirm
+
+We can now see that =nginx= has been allocated a =ClusterIP= on which
+it can receive requests.
+
+#+BEGIN_SRC sh :results output :exports both
+echo '--- default'
+kubectl get svc,pods,deployments,nodes -o wide
+echo 
+echo 
+echo '--- kube-system'
+kubectl get svc,pods,deployments,nodes -o wide --namespace kube-system
+echo 
+echo 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+--- default
+NAME                     CLUSTER-IP    EXTERNAL-IP   PORT(S)      AGE         SELECTOR
+kubernetes               10.32.0.1     <none>        443/TCP      10d         <none>
+nginx                    10.32.0.209   <nodes>       80/TCP       44s         run=nginx
+NAME                     READY         STATUS        RESTARTS     AGE         IP           NODE
+nginx-2032906785-2esi5   1/1           Running       0            1d          10.200.2.3   worker2
+nginx-2032906785-q3rk3   1/1           Running       0            1d          10.200.1.2   worker1
+nginx-2032906785-zdaob   1/1           Running       0            1d          10.200.0.3   worker0
+NAME                     DESIRED       CURRENT       UP-TO-DATE   AVAILABLE   AGE
+nginx                    3             3             3            3           1d
+NAME                     STATUS        AGE
+worker0                  Ready         10d
+worker1                  Ready         4d
+worker2                  Ready         4d
+
+
+--- kube-system
+NAME                           CLUSTER-IP   EXTERNAL-IP   PORT(S)         AGE         SELECTOR
+kube-dns                       10.32.0.10   <none>        53/UDP,53/TCP   1d          k8s-app=kube-dns
+NAME                           READY        STATUS        RESTARTS        AGE         IP           NODE
+kube-dns-v19-965658604-11x0e   3/3          Running       0               1d          10.200.0.2   worker0
+kube-dns-v19-965658604-qewo9   3/3          Running       0               1d          10.200.2.2   worker2
+NAME                           DESIRED      CURRENT       UP-TO-DATE      AVAILABLE   AGE
+kube-dns-v19                   2            2             2               2           1d
+NAME                           STATUS       AGE
+worker0                        Ready        10d
+worker1                        Ready        4d
+worker2                        Ready        4d
+
+
+#+end_example
+
+*** Grab the =NodePort= to create a Firewall Rule
+
+We need to inspect the state of the =Service= which was created for
+the =Nginx= pod to receive requests in order to figure out which is
+the port which was dynamically allocated to it.
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl get svc nginx --output=json
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+{
+    "kind": "Service",
+    "apiVersion": "v1",
+    "metadata": {
+        "name": "nginx",
+        "namespace": "default",
+        "selfLink": "/api/v1/namespaces/default/services/nginx",
+        "uid": "c2631c91-8282-11e6-bf0b-42010af00014",
+        "resourceVersion": "1119205",
+        "creationTimestamp": "2016-09-24T18:14:40Z",
+        "labels": {
+            "run": "nginx"
+        }
+    },
+    "spec": {
+        "ports": [
+            {
+                "protocol": "TCP",
+                "port": 80,
+                "targetPort": 80,
+                "nodePort": 32013
+            }
+        ],
+        "selector": {
+            "run": "nginx"
+        },
+        "clusterIP": "10.32.0.209",
+        "type": "NodePort",
+        "sessionAffinity": "None"
+    },
+    "status": {
+        "loadBalancer": {}
+    }
+}
+#+END_SRC
+
+We can traverse the json above by using the =jsonpath= output.
+
+#+BEGIN_SRC sh :results output
+kubectl get svc nginx --output=jsonpath='{range .spec.ports[0]}{.nodePort}'
+#+END_SRC
+
+#+RESULTS:
+: 32013
+
+*** Create the Firewall rule
+
+#+BEGIN_SRC sh :results output :exports both
+gcloud compute firewall-rules create kubernetes-nginx-service \
+  --allow=tcp:32013 \
+  --network kubernetes
+#+END_SRC
+
+#+RESULTS:
+: NAME                      NETWORK     SRC_RANGES  RULES      SRC_TAGS  TARGET_TAGS
+: kubernetes-nginx-service  kubernetes  0.0.0.0/0   tcp:32013
+
+Now if we grab any of the worker nodes and send a request to it in
+this port, we will see that all of them reply with =200 OK=.
+
+#+BEGIN_SRC sh :results output :exports both
+gcloud compute instances list | grep worker | grep RUNNING | awk '{print $5}' | xargs -I ip curl -v http://ip:32013 2>&1 | grep -A5 HTTP
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+> GET / HTTP/1.1
+> Host: AAA.BBB.CCC.6:32013
+> User-Agent: curl/7.43.0
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< Server: nginx/1.11.4
+< Date: Sat, 24 Sep 2016 19:40:00 GMT
+< Content-Type: text/html
+< Content-Length: 612
+< Last-Modified: Tue, 13 Sep 2016 16:18:28 GMT
+--
+> GET / HTTP/1.1
+> Host: AAA.BBB.CCC.7:32013
+> User-Agent: curl/7.43.0
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< Server: nginx/1.11.4
+< Date: Sat, 24 Sep 2016 19:40:00 GMT
+< Content-Type: text/html
+< Content-Length: 612
+< Last-Modified: Tue, 13 Sep 2016 16:18:28 GMT
+--
+> GET / HTTP/1.1
+> Host: AAA.BBB.CCC.8:32013
+> User-Agent: curl/7.43.0
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< Server: nginx/1.11.4
+< Date: Sat, 24 Sep 2016 19:40:00 GMT
+< Content-Type: text/html
+< Content-Length: 612
+< Last-Modified: Tue, 13 Sep 2016 16:18:28 GMT
+#+END_SRC
+

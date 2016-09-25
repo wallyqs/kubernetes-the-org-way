@@ -1,0 +1,133 @@
+#+TITLE: Configuring the Kubernetes Client
+
+**** For OS X
+
+#+BEGIN_SRC sh :dir files :results output
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/darwin/amd64/kubectl
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/kubectl
+kubectl
+#+END_SRC
+
+**** Set context configuration
+
+#+BEGIN_SRC sh :results output code :exports both
+gcloud compute addresses describe kubernetes --region us-central1 --format 'value(address)'
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+AAA.BBB.CCC.100
+#+END_SRC
+
+****** COMMENT Insecure config
+
+#+BEGIN_SRC sh :results output :exports both
+export PUBLIC_IP="AAA.BBB.CCC.100"
+
+# Need the load balancer public ip so that it load balances the API server nodes
+kubectl config set-cluster local --server=http://$PUBLIC_IP:8080 --insecure-skip-tls-verify=true
+kubectl config set-context local --cluster=local
+kubectl config use-context local
+#+END_SRC
+
+#+RESULTS:
+: cluster "local" set.
+: context "local" set.
+: switched to context "local".
+
+****** Secure config
+
+Building the =kubeconfig= used by =kubectl=:
+
+#+BEGIN_SRC sh :dir files :exports both
+export KUBERNETES_PUBLIC_ADDRESS="AAA.BBB.CCC.100"
+
+kubectl config set-cluster kubernetes-the-org-way \
+  --certificate-authority=ca.pem \
+  --embed-certs=true \
+  --server=https://${KUBERNETES_PUBLIC_ADDRESS}:6443
+#+END_SRC
+
+#+RESULTS:
+: kubernetes-the-org-way
+
+#+BEGIN_SRC sh :exports both
+kubectl config set-credentials admin --token secreto
+#+END_SRC
+
+#+RESULTS:
+: admin
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl config set-context default-context \
+  --cluster=kubernetes-the-org-way \
+  --user=admin
+#+END_SRC
+
+#+RESULTS:
+: context "default-context" set.
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl config use-context default-context
+#+END_SRC
+
+#+RESULTS:
+: switched to context "default-context".
+
+**** Confirm current configuration
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl config view -o json
+#+END_SRC
+
+#+RESULTS:
+#+begin_example js
+{
+    "kind": "Config",
+    "apiVersion": "v1",
+    "preferences": {},
+    "clusters": [
+        {
+            "name": "kubernetes-the-org-way",
+            "cluster": {
+                "server": "https://AAA.BBB.CCC.100:6443",
+                "certificate-authority-data": "REDACTED"
+            }
+        },
+        {
+            "name": "local",
+            "cluster": {
+                "server": "http://AAA.BBB.CCC.100:8080",
+                "insecure-skip-tls-verify": true
+            }
+        }
+    ],
+    "users": [
+        {
+            "name": "admin",
+            "user": {
+                "token": "secreto"
+            }
+        }
+    ],
+    "contexts": [
+        {
+            "name": "default-context",
+            "context": {
+                "cluster": "kubernetes-the-org-way",
+                "user": "admin"
+            }
+        },
+        {
+            "name": "local",
+            "context": {
+                "cluster": "local",
+                "user": ""
+            }
+        }
+    ],
+    "current-context": "default-context"
+}
+#+end_example
+

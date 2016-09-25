@@ -1,0 +1,1240 @@
+# -*- mode: org; mode: auto-fill -*-
+#+title:	Bootstrapping Kubernetes Workers
+#+startup:	showeverything
+#+property:	header-args :results output code
+
+*** Current Status
+
+#+BEGIN_SRC sh
+gcloud compute instances list
+#+END_SRC
+
+| NAME        | ZONE          | MACHINE_TYPE  | INTERNAL_IP | EXTERNAL_IP | STATUS  |
+| controller0 | us-central1-a | n1-standard-1 | 10.240.0.20 | AAA.BBB.CCC.1 | RUNNING |
+| controller1 | us-central1-a | n1-standard-1 | 10.240.0.21 | AAA.BBB.CCC.2 | RUNNING |
+| etcd0       | us-central1-a | n1-standard-1 | 10.240.0.10 | AAA.BBB.CCC.3 | RUNNING |
+| etcd1       | us-central1-a | n1-standard-1 | 10.240.0.11 | AAA.BBB.CCC.4 | RUNNING |
+| etcd2       | us-central1-a | n1-standard-1 | 10.240.0.12 | AAA.BBB.CCC.5 | RUNNING |
+| worker0     | us-central1-a | n1-standard-1 | 10.240.0.30 | AAA.BBB.CCC.6 | RUNNING |
+| worker1     | us-central1-a | n1-standard-1 | 10.240.0.31 | AAA.BBB.CCC.7 | RUNNING |
+| worker2     | us-central1-a | n1-standard-1 | 10.240.0.32 | AAA.BBB.CCC.8 | RUNNING |
+
+*** Kubernetes Workers
+
+# This is where the apps/jobs/tasks/pods will be running.
+# Kubernetes Execution Agent
+
+**** worker0 (10.240.0.30)
+  :properties:
+  :header-args: :dir /ssh:worker0.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+- [X] tls config
+- [X] docker 
+- [X] kubelet
+- [X] kube-proxy
+
+***** Confirm ip
+
+#+BEGIN_SRC sh :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:1e brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.30/32 brd 10.240.0.30 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:1e/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+***** TLS Certificates
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubernetes
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
+#+END_SRC
+
+***** Docker
+
+Kubernetes should be compatible with the Docker 1.9.x - 1.11.x:
+
+#+BEGIN_SRC sh
+curl -O -L https://get.docker.com/builds/Linux/x86_64/docker-1.11.2.tgz
+#+END_SRC
+
+#+BEGIN_SRC sh
+tar -xvf docker-1.11.2.tgz
+#+END_SRC
+
+Install in =PATH=
+
+#+BEGIN_SRC sh
+sudo cp docker/docker* /usr/bin/
+#+END_SRC
+
+****** Systemd service file
+
+#+BEGIN_SRC conf :tangle /ssh:worker0.us-central1-a.EXAMPLE-99999:/tmp/docker.service
+[Unit]
+Description=Docker Application Container Engine
+Documentation=http://docs.docker.io
+
+[Service]
+ExecStart=/usr/bin/docker daemon \
+  --iptables=false \
+  --ip-masq=false \
+  --host=unix:///var/run/docker.sock \
+  --log-level=error \
+  --storage-driver=overlay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+****** Configure Systemd service
+
+#+BEGIN_SRC sh
+sudo cp /tmp/docker.service /etc/systemd/system/docker.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable docker
+sudo systemctl start docker
+#+END_SRC
+
+Confirm Docker is running
+
+#+BEGIN_SRC sh :exports both
+sudo docker version
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Client:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+
+Server:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+#+end_example
+
+***** Kubelet
+
+Setup the /Container Networking Interface/ to manager the network overlay which Kubernetes needs
+since we have a multi host deployment.
+
+****** Setup Container Networking
+
+#+BEGIN_SRC sh
+sudo mkdir -p /opt/cni
+#+END_SRC
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+#+END_SRC
+
+#+BEGIN_SRC sh :results silent
+sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+#+END_SRC
+
+This tarball contains the following binaries, notably =flannel=
+
+#+BEGIN_SRC 
+x bin/
+x bin/flannel
+x bin/ipvlan
+x bin/loopback
+x bin/ptp
+x bin/tuning
+x bin/bridge
+x bin/host-local
+x bin/macvlan
+x bin/cnitool
+x bin/dhcp
+#+END_SRC
+
+****** Setup Kubernetes binaries
+
+The =kube-proxy=, =kubelet= need to be colocated in this box as well.
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+#+END_SRC
+
+Install the binaries:
+
+#+BEGIN_SRC sh
+chmod +x kubectl kube-proxy kubelet
+sudo cp kubectl kube-proxy kubelet /usr/bin/
+#+END_SRC
+
+****** Prepare the Kubernetes configuration
+
+Folder for the *Kubelet*:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubelet/
+#+END_SRC
+
+Configuration for the kubelet, note that it knows explicitly where the =controller0=
+is in the =cluster:server= section:
+
+#+BEGIN_SRC yaml :tangle /ssh:worker0.us-central1-a.EXAMPLE-99999:/tmp/kubelet.yaml :results output
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority: /var/lib/kubernetes/ca.pem
+    server: https://10.240.0.20:6443
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kubelet
+  name: kubelet
+current-context: kubelet
+users:
+- name: kubelet
+  user:
+    token: secreto
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp /tmp/kubelet.yaml /var/lib/kubelet/kubeconfig
+#+END_SRC
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker0.us-central1-a.EXAMPLE-99999:/tmp/kubelet.service :results output
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/kubelet \
+  --allow-privileged=true \
+  --api-servers=https://10.240.0.20:6443,https://10.240.0.21:6443,https://10.240.0.22:6443 \
+  --cloud-provider= \
+  --cluster-dns=10.32.0.10 \
+  --cluster-domain=cluster.local \
+  --configure-cbr0=true \
+  --container-runtime=docker \
+  --docker=unix:///var/run/docker.sock \
+  --network-plugin=kubenet \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --reconcile-cidr=true \
+  --serialize-image-pulls=false \
+  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \
+  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kubelet.service /etc/systemd/system/kubelet.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kubelet
+sudo systemctl start kubelet
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kubelet -n 50 -l --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kubelet.service - Kubernetes Kubelet
+   Loaded: loaded (/etc/systemd/system/kubelet.service; enabled; vendor preset: enabled)
+   Active: active (running) since Tue 2016-09-13 22:20:36 UTC; 6 days ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 15248 (kubelet)
+    Tasks: 12
+   Memory: 25.3M
+      CPU: 1h 1min 48.960s
+   CGroup: /system.slice/kubelet.service
+           ├─15248 /usr/bin/kubelet --allow-privileged=true --api-servers=https://10.240.0.20:6443,https://10.240.0.21:6443,https://10.240.0.22:6443 --cloud-provider= --cluster-dns=10.32.0.10 --cluster-domain=cluster.local --configure-cbr0=true --container-runtime=docker --docker=unix:///var/run/docker.sock --network-plugin=kubenet --kubeconfig=/var/lib/kubelet/kubeconfig --reconcile-cidr=true --serialize-image-pulls=false --tls-cert-file=/var/lib/kubernetes/kubernetes.pem --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem --v=2
+           └─15299 journalctl -k -f
+
+Sep 20 14:15:39 worker0 kubelet[15248]: I0920 14:15:39.595829   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:20:39 worker0 kubelet[15248]: I0920 14:20:39.596935   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:25:39 worker0 kubelet[15248]: I0920 14:25:39.597488   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:30:39 worker0 kubelet[15248]: I0920 14:30:39.598734   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:35:39 worker0 kubelet[15248]: I0920 14:35:39.608043   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:40:39 worker0 kubelet[15248]: I0920 14:40:39.609380   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:45:39 worker0 kubelet[15248]: I0920 14:45:39.610672   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:50:39 worker0 kubelet[15248]: I0920 14:50:39.611954   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 14:55:39 worker0 kubelet[15248]: I0920 14:55:39.613184   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:00:39 worker0 kubelet[15248]: I0920 15:00:39.613607   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:05:39 worker0 kubelet[15248]: I0920 15:05:39.613983   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:10:39 worker0 kubelet[15248]: I0920 15:10:39.615225   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:15:39 worker0 kubelet[15248]: I0920 15:15:39.616406   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:20:39 worker0 kubelet[15248]: I0920 15:20:39.616834   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:25:39 worker0 kubelet[15248]: I0920 15:25:39.619418   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:30:39 worker0 kubelet[15248]: I0920 15:30:39.620642   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:35:39 worker0 kubelet[15248]: I0920 15:35:39.621835   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:40:39 worker0 kubelet[15248]: I0920 15:40:39.622969   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:45:39 worker0 kubelet[15248]: I0920 15:45:39.624069   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:50:39 worker0 kubelet[15248]: I0920 15:50:39.625222   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 15:55:39 worker0 kubelet[15248]: I0920 15:55:39.626358   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:00:39 worker0 kubelet[15248]: I0920 16:00:39.626788   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:05:39 worker0 kubelet[15248]: I0920 16:05:39.627968   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:10:39 worker0 kubelet[15248]: I0920 16:10:39.629124   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:15:39 worker0 kubelet[15248]: I0920 16:15:39.630940   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:20:39 worker0 kubelet[15248]: I0920 16:20:39.632202   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:25:39 worker0 kubelet[15248]: I0920 16:25:39.633501   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:30:39 worker0 kubelet[15248]: I0920 16:30:39.634000   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:35:39 worker0 kubelet[15248]: I0920 16:35:39.635209   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:40:39 worker0 kubelet[15248]: I0920 16:40:39.636651   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:45:39 worker0 kubelet[15248]: I0920 16:45:39.637858   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:50:39 worker0 kubelet[15248]: I0920 16:50:39.638233   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 16:55:39 worker0 kubelet[15248]: I0920 16:55:39.639572   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:00:39 worker0 kubelet[15248]: I0920 17:00:39.640826   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:05:39 worker0 kubelet[15248]: I0920 17:05:39.642012   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:10:39 worker0 kubelet[15248]: I0920 17:10:39.642717   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:15:39 worker0 kubelet[15248]: I0920 17:15:39.644214   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:20:39 worker0 kubelet[15248]: I0920 17:20:39.645304   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:25:39 worker0 kubelet[15248]: I0920 17:25:39.646498   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:30:39 worker0 kubelet[15248]: I0920 17:30:39.647784   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:35:39 worker0 kubelet[15248]: I0920 17:35:39.649028   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:40:39 worker0 kubelet[15248]: I0920 17:40:39.649575   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:45:39 worker0 kubelet[15248]: I0920 17:45:39.649976   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:50:39 worker0 kubelet[15248]: I0920 17:50:39.650460   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 17:55:39 worker0 kubelet[15248]: I0920 17:55:39.651808   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 18:00:39 worker0 kubelet[15248]: I0920 18:00:39.652252   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 18:05:39 worker0 kubelet[15248]: I0920 18:05:39.653363   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 18:10:39 worker0 kubelet[15248]: I0920 18:10:39.654561   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 18:15:39 worker0 kubelet[15248]: I0920 18:15:39.655716   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+Sep 20 18:20:39 worker0 kubelet[15248]: I0920 18:20:39.656619   15248 container_manager_linux.go:284] Discovered runtime cgroups name: /system.slice/docker.service
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kubelet -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:09:15 UTC, end at Tue 2016-09-13 22:21:11 UTC. --
+Sep 13 22:20:37 worker0 kubelet[15248]:     ]
+Sep 13 22:20:37 worker0 kubelet[15248]:   }
+Sep 13 22:20:37 worker0 kubelet[15248]: }
+Sep 13 22:20:41 worker0 kubelet[15248]: I0913 22:20:41.868014   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:20:46 worker0 kubelet[15248]: I0913 22:20:46.869096   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:20:51 worker0 kubelet[15248]: I0913 22:20:51.870048   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:20:56 worker0 kubelet[15248]: I0913 22:20:56.871212   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:21:01 worker0 kubelet[15248]: I0913 22:21:01.872208   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:21:06 worker0 kubelet[15248]: I0913 22:21:06.873015   15248 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 13 22:21:07 worker0 kubelet[15248]: I0913 22:21:07.249839   15248 kubelet.go:2924] Recording NodeReady event message for node worker0
+#+end_example
+
+***** Kube Proxy
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker0.us-central1-a.EXAMPLE-99999:/tmp/kube-proxy.service :results output
+[Unit]
+Description=Kubernetes Kube Proxy
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-proxy \
+  --master=https://10.240.0.20:6443 \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --proxy-mode=iptables \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+Add to systemd
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kube-proxy.service /etc/systemd/system/kube-proxy.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-proxy
+sudo systemctl start kube-proxy
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-proxy --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-proxy.service - Kubernetes Kube Proxy
+   Loaded: loaded (/etc/systemd/system/kube-proxy.service; enabled; vendor preset: enabled)
+   Active: active (running) since Tue 2016-09-13 22:30:21 UTC; 9s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 15838 (kube-proxy)
+    Tasks: 6
+   Memory: 5.3M
+      CPU: 232ms
+   CGroup: /system.slice/kube-proxy.service
+           └─15838 /usr/bin/kube-proxy --master=https://10.240.0.20:6443 --ku...
+
+Sep 13 22:30:21 worker0 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.552261   15838 ser...d
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.560197   15838 ser....
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.597382   15838 ser....
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.607500   15838 con...8
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.608746   15838 con...2
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.609170   15838 con...0
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.612726   15838 pro...P
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.613203   15838 pro...r
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.629641   15838 pro...]
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+#+BEGIN_SRC sh
+sudo journalctl -u kube-proxy -n 50 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:09:15 UTC, end at Tue 2016-09-20 18:13:41 UTC. --
+Sep 13 22:30:21 worker0 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.552261   15838 server.go:155] setting OOM scores is unsupported in this build
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.560197   15838 server.go:202] Using iptables Proxier.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.597382   15838 server.go:214] Tearing down userspace rules.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.607500   15838 conntrack.go:40] Setting nf_conntrack_max to 32768
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.608746   15838 conntrack.go:57] Setting conntrack hashsize to 8192
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.609170   15838 conntrack.go:62] Setting nf_conntrack_tcp_timeout_established to 86400
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.612726   15838 proxier.go:440] Adding new service "default/kubernetes:https" at 10.32.0.1:443/TCP
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.613203   15838 proxier.go:674] Not syncing iptables until Services and Endpoints have been received from master
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.629641   15838 proxier.go:516] Setting endpoints for "default/kubernetes:https" to [10.240.0.20:6443]
+#+end_example
+
+****** More logs
+
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:09:15 UTC, end at Tue 2016-09-13 22:31:09 UTC. --
+Sep 13 22:30:21 worker0 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.552261   15838 server.go:155] setting OOM scores is unsupported in this build
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.560197   15838 server.go:202] Using iptables Proxier.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.597382   15838 server.go:214] Tearing down userspace rules.
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.607500   15838 conntrack.go:40] Setting nf_conntrack_max to 32768
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.608746   15838 conntrack.go:57] Setting conntrack hashsize to 8192
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.609170   15838 conntrack.go:62] Setting nf_conntrack_tcp_timeout_established to 86400
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.612726   15838 proxier.go:440] Adding new service "default/kubernetes:https" at 10.32.0.1:443/TCP
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.613203   15838 proxier.go:674] Not syncing iptables until Services and Endpoints have been received from master
+Sep 13 22:30:21 worker0 kube-proxy[15838]: I0913 22:30:21.629641   15838 proxier.go:516] Setting endpoints for "default/kubernetes:https" to [10.240.0.20:6443]
+#+end_example
+
+***** From the logs
+
+#+BEGIN_SRC 
+Adding new service "default/kubernetes:https" at 10.32.0.1:443/TCP
+#+END_SRC
+
+**** worker1 (10.240.0.31)
+  :properties:
+  :header-args: :dir /ssh:worker1.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+- [X] tls config
+- [X] docker 
+- [X] kubelet
+- [X] kube-proxy
+
+***** Confirm ip
+
+#+BEGIN_SRC sh :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:1f brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.31/32 brd 10.240.0.31 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:1f/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+***** TLS Certificates
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubernetes
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
+sudo ls -la /var/lib/kubernetes/
+#+END_SRC
+
+***** Docker
+
+Kubernetes should be compatible with the Docker 1.9.x - 1.11.x:
+
+#+BEGIN_SRC sh
+curl -O -L https://get.docker.com/builds/Linux/x86_64/docker-1.11.2.tgz
+#+END_SRC
+
+#+BEGIN_SRC sh
+tar -xvf docker-1.11.2.tgz
+#+END_SRC
+
+Install in =PATH=
+
+#+BEGIN_SRC sh
+sudo cp docker/docker* /usr/bin/
+#+END_SRC
+
+****** Systemd service file
+
+#+BEGIN_SRC conf :tangle /ssh:worker1.us-central1-a.EXAMPLE-99999:/tmp/docker.service
+[Unit]
+Description=Docker Application Container Engine
+Documentation=http://docs.docker.io
+
+[Service]
+ExecStart=/usr/bin/docker daemon \
+  --iptables=false \
+  --ip-masq=false \
+  --host=unix:///var/run/docker.sock \
+  --log-level=error \
+  --storage-driver=overlay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+****** Configure Systemd service
+
+#+BEGIN_SRC sh
+sudo cp /tmp/docker.service /etc/systemd/system/docker.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable docker
+sudo systemctl start docker
+#+END_SRC
+
+Confirm Docker is running
+
+#+BEGIN_SRC sh ;exports both
+sudo docker version
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Client:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+
+Server:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+#+end_example
+
+***** Kubelet
+
+Setup the /Container Networking Interface/ to manager the network overlay which Kubernetes needs
+since we have a multi host deployment.
+
+****** Setup Container Networking
+
+#+BEGIN_SRC sh
+sudo mkdir -p /opt/cni
+#+END_SRC
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+#+END_SRC
+
+#+BEGIN_SRC sh :results silent
+sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+#+END_SRC
+
+This tarball contains the following binaries, notably =flannel=
+
+#+BEGIN_SRC 
+x bin/
+x bin/flannel
+x bin/ipvlan
+x bin/loopback
+x bin/ptp
+x bin/tuning
+x bin/bridge
+x bin/host-local
+x bin/macvlan
+x bin/cnitool
+x bin/dhcp
+#+END_SRC
+
+****** Setup Kubernetes binaries
+
+The =kube-proxy=, =kubelet= need to be colocated in this box as well.
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+#+END_SRC
+
+Install the binaries:
+
+#+BEGIN_SRC sh
+chmod +x kubectl kube-proxy kubelet
+sudo cp kubectl kube-proxy kubelet /usr/bin/
+#+END_SRC
+
+****** Prepare the Kubernetes configuration
+
+Folder for the *Kubelet*:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubelet/
+#+END_SRC
+
+Configuration for the kubelet, note that it knows explicitly where the =controller0=
+is in the =cluster:server= section:
+
+#+BEGIN_SRC yaml :tangle /ssh:worker1.us-central1-a.EXAMPLE-99999:/tmp/kubelet.yaml :results output
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority: /var/lib/kubernetes/ca.pem
+    server: https://10.240.0.20:6443
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kubelet
+  name: kubelet
+current-context: kubelet
+users:
+- name: kubelet
+  user:
+    token: secreto
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp /tmp/kubelet.yaml /var/lib/kubelet/kubeconfig
+#+END_SRC
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker1.us-central1-a.EXAMPLE-99999:/tmp/kubelet.service :results output
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/kubelet \
+  --allow-privileged=true \
+  --api-servers=https://10.240.0.20:6443,https://10.240.0.21:6443,https://10.240.0.22:6443 \
+  --cloud-provider= \
+  --cluster-dns=10.32.0.10 \
+  --cluster-domain=cluster.local \
+  --configure-cbr0=true \
+  --container-runtime=docker \
+  --docker=unix:///var/run/docker.sock \
+  --network-plugin=kubenet \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --reconcile-cidr=true \
+  --serialize-image-pulls=false \
+  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \
+  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kubelet.service /etc/systemd/system/kubelet.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kubelet
+sudo systemctl start kubelet
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kubelet --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kubelet.service - Kubernetes Kubelet
+   Loaded: loaded (/etc/systemd/system/kubelet.service; enabled; vendor preset: enabled)
+   Active: active (running) since Mon 2016-09-19 23:19:12 UTC; 6s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 20708 (kubelet)
+    Tasks: 9
+   Memory: 16.4M
+      CPU: 303ms
+   CGroup: /system.slice/kubelet.service
+           ├─20708 /usr/bin/kubelet --allow-privileged=true --api-servers=htt...
+           └─20757 journalctl -k -f
+
+Sep 19 23:19:13 worker1 kubelet[20708]:   "ipam": {
+Sep 19 23:19:13 worker1 kubelet[20708]:     "type": "host-local",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "subnet": "10.200.1.0/24",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "gateway": "10.200.1.1",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "routes": [
+Sep 19 23:19:13 worker1 kubelet[20708]:       { "dst": "0.0.0.0/0" }
+Sep 19 23:19:13 worker1 kubelet[20708]:     ]
+Sep 19 23:19:13 worker1 kubelet[20708]:   }
+Sep 19 23:19:13 worker1 kubelet[20708]: }
+Sep 19 23:19:17 worker1 kubelet[20708]: I0919 23:19:17.992938   20708 kubele...]
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kubelet -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:09:38 UTC, end at Mon 2016-09-19 23:19:24 UTC. --
+Sep 19 23:19:13 worker1 kubelet[20708]:     "type": "host-local",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "subnet": "10.200.1.0/24",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "gateway": "10.200.1.1",
+Sep 19 23:19:13 worker1 kubelet[20708]:     "routes": [
+Sep 19 23:19:13 worker1 kubelet[20708]:       { "dst": "0.0.0.0/0" }
+Sep 19 23:19:13 worker1 kubelet[20708]:     ]
+Sep 19 23:19:13 worker1 kubelet[20708]:   }
+Sep 19 23:19:13 worker1 kubelet[20708]: }
+Sep 19 23:19:17 worker1 kubelet[20708]: I0919 23:19:17.992938   20708 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 19 23:19:22 worker1 kubelet[20708]: I0919 23:19:22.993942   20708 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+#+end_example
+
+***** Kube Proxy
+
+- [ ] Can only set a single master API server? [[https://github.com/kubernetes/kubernetes/issues/18174]]
+  :  --master=https://10.240.0.20:6443 \
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker1.us-central1-a.EXAMPLE-99999:/tmp/kube-proxy.service :results output
+[Unit]
+Description=Kubernetes Kube Proxy
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-proxy \
+  --master=https://10.240.0.20:6443 \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --proxy-mode=iptables \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+Add to systemd
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kube-proxy.service /etc/systemd/system/kube-proxy.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-proxy
+sudo systemctl start kube-proxy
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-proxy --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-proxy.service - Kubernetes Kube Proxy
+   Loaded: loaded (/etc/systemd/system/kube-proxy.service; enabled; vendor preset: enabled)
+   Active: active (running) since Mon 2016-09-19 23:20:11 UTC; 5s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 20946 (kube-proxy)
+    Tasks: 6
+   Memory: 5.2M
+      CPU: 145ms
+   CGroup: /system.slice/kube-proxy.service
+           └─20946 /usr/bin/kube-proxy --master=https://10.240.0.20:6443 --ku...
+
+Sep 19 23:20:11 worker1 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.534150   20946 ser...d
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.545073   20946 ser....
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.579432   20946 ser....
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.590601   20946 con...8
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.591734   20946 con...2
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.592019   20946 con...0
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.595851   20946 pro...P
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.596497   20946 pro...r
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.612833   20946 pro...]
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kube-proxy -n 30 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:09:38 UTC, end at Mon 2016-09-19 23:20:20 UTC. --
+Sep 19 23:20:11 worker1 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.534150   20946 server.go:155] setting OOM scores is unsupported in this build
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.545073   20946 server.go:202] Using iptables Proxier.
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.579432   20946 server.go:214] Tearing down userspace rules.
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.590601   20946 conntrack.go:40] Setting nf_conntrack_max to 32768
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.591734   20946 conntrack.go:57] Setting conntrack hashsize to 8192
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.592019   20946 conntrack.go:62] Setting nf_conntrack_tcp_timeout_established to 86400
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.595851   20946 proxier.go:440] Adding new service "default/kubernetes:https" at 10.32.0.1:443/TCP
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.596497   20946 proxier.go:674] Not syncing iptables until Services and Endpoints have been received from master
+Sep 19 23:20:11 worker1 kube-proxy[20946]: I0919 23:20:11.612833   20946 proxier.go:516] Setting endpoints for "default/kubernetes:https" to [10.240.0.20:6443]
+#+end_example
+
+**** worker2 (10.240.0.32)
+  :properties:
+  :header-args: :dir /ssh:worker2.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+- [X] tls config
+- [X] docker 
+- [X] kubelet
+- [X] kube-proxy
+
+***** Confirm ip
+
+#+BEGIN_SRC sh :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:20 brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.32/32 brd 10.240.0.32 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:20/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+***** TLS Certificates
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubernetes
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
+sudo ls -la /var/lib/kubernetes/
+#+END_SRC
+
+***** Docker
+
+Kubernetes should be compatible with the Docker 1.9.x - 1.11.x:
+
+#+BEGIN_SRC sh
+curl -O -L https://get.docker.com/builds/Linux/x86_64/docker-1.11.2.tgz
+#+END_SRC
+
+#+BEGIN_SRC sh
+tar -xvf docker-1.11.2.tgz
+#+END_SRC
+
+Install in =PATH=
+
+#+BEGIN_SRC sh
+sudo cp docker/docker* /usr/bin/
+#+END_SRC
+
+****** Systemd service file
+
+#+BEGIN_SRC conf :tangle /ssh:worker2.us-central1-a.EXAMPLE-99999:/tmp/docker.service
+[Unit]
+Description=Docker Application Container Engine
+Documentation=http://docs.docker.io
+
+[Service]
+ExecStart=/usr/bin/docker daemon \
+  --iptables=false \
+  --ip-masq=false \
+  --host=unix:///var/run/docker.sock \
+  --log-level=error \
+  --storage-driver=overlay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+****** Configure Systemd service
+
+#+BEGIN_SRC sh
+sudo cp /tmp/docker.service /etc/systemd/system/docker.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable docker
+sudo systemctl start docker
+#+END_SRC
+
+Confirm Docker is running
+
+#+BEGIN_SRC sh :exports both
+sudo docker version
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Client:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+
+Server:
+ Version:      1.11.2
+ API version:  1.23
+ Go version:   go1.5.4
+ Git commit:   b9f10c9
+ Built:        Wed Jun  1 21:20:08 2016
+ OS/Arch:      linux/amd64
+#+end_example
+
+***** Kubelet
+
+Setup the /Container Networking Interface/ to manager the network overlay which Kubernetes needs
+since we have a multi host deployment.
+
+****** Setup Container Networking
+
+#+BEGIN_SRC sh
+sudo mkdir -p /opt/cni
+#+END_SRC
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+#+END_SRC
+
+#+BEGIN_SRC sh :results silent
+sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+#+END_SRC
+
+This tarball contains the following binaries, notably =flannel=
+
+#+BEGIN_SRC 
+x bin/
+x bin/flannel
+x bin/ipvlan
+x bin/loopback
+x bin/ptp
+x bin/tuning
+x bin/bridge
+x bin/host-local
+x bin/macvlan
+x bin/cnitool
+x bin/dhcp
+#+END_SRC
+
+****** Setup Kubernetes binaries
+
+The =kube-proxy=, =kubelet= need to be colocated in this box as well.
+
+#+BEGIN_SRC sh
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+#+END_SRC
+
+Install the binaries:
+
+#+BEGIN_SRC sh
+chmod +x kubectl kube-proxy kubelet
+sudo cp kubectl kube-proxy kubelet /usr/bin/
+#+END_SRC
+
+****** Prepare the Kubernetes configuration
+
+Folder for the *Kubelet*:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/kubelet/
+#+END_SRC
+
+Configuration for the kubelet, note that it knows explicitly where the =controller0=
+is in the =cluster:server= section:
+
+#+BEGIN_SRC yaml :tangle /ssh:worker2.us-central1-a.EXAMPLE-99999:/tmp/kubelet.yaml :results output
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority: /var/lib/kubernetes/ca.pem
+    server: https://10.240.0.20:6443
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kubelet
+  name: kubelet
+current-context: kubelet
+users:
+- name: kubelet
+  user:
+    token: secreto
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo cp /tmp/kubelet.yaml /var/lib/kubelet/kubeconfig
+#+END_SRC
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker2.us-central1-a.EXAMPLE-99999:/tmp/kubelet.service :results output
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/kubelet \
+  --allow-privileged=true \
+  --api-servers=https://10.240.0.20:6443,https://10.240.0.21:6443,https://10.240.0.22:6443 \
+  --cloud-provider= \
+  --cluster-dns=10.32.0.10 \
+  --cluster-domain=cluster.local \
+  --configure-cbr0=true \
+  --container-runtime=docker \
+  --docker=unix:///var/run/docker.sock \
+  --network-plugin=kubenet \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --reconcile-cidr=true \
+  --serialize-image-pulls=false \
+  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \
+  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kubelet.service /etc/systemd/system/kubelet.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kubelet
+sudo systemctl start kubelet
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kubelet --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kubelet.service - Kubernetes Kubelet
+   Loaded: loaded (/etc/systemd/system/kubelet.service; enabled; vendor preset: enabled)
+   Active: active (running) since Mon 2016-09-19 23:24:52 UTC; 13s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 14994 (kubelet)
+    Tasks: 10
+   Memory: 18.5M
+      CPU: 357ms
+   CGroup: /system.slice/kubelet.service
+           ├─14994 /usr/bin/kubelet --allow-privileged=true --api-servers=htt...
+           └─15043 journalctl -k -f
+
+Sep 19 23:24:52 worker2 kubelet[14994]:     "type": "host-local",
+Sep 19 23:24:52 worker2 kubelet[14994]:     "subnet": "10.200.2.0/24",
+Sep 19 23:24:52 worker2 kubelet[14994]:     "gateway": "10.200.2.1",
+Sep 19 23:24:52 worker2 kubelet[14994]:     "routes": [
+Sep 19 23:24:52 worker2 kubelet[14994]:       { "dst": "0.0.0.0/0" }
+Sep 19 23:24:52 worker2 kubelet[14994]:     ]
+Sep 19 23:24:52 worker2 kubelet[14994]:   }
+Sep 19 23:24:52 worker2 kubelet[14994]: }
+Sep 19 23:24:57 worker2 kubelet[14994]: I0919 23:24:57.357652   14994 kubele...]
+Sep 19 23:25:02 worker2 kubelet[14994]: I0919 23:25:02.358704   14994 kubele...]
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kubelet -n 10 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:31:39 UTC, end at Mon 2016-09-19 23:25:11 UTC. --
+Sep 19 23:24:52 worker2 kubelet[14994]:     "subnet": "10.200.2.0/24",
+Sep 19 23:24:52 worker2 kubelet[14994]:     "gateway": "10.200.2.1",
+Sep 19 23:24:52 worker2 kubelet[14994]:     "routes": [
+Sep 19 23:24:52 worker2 kubelet[14994]:       { "dst": "0.0.0.0/0" }
+Sep 19 23:24:52 worker2 kubelet[14994]:     ]
+Sep 19 23:24:52 worker2 kubelet[14994]:   }
+Sep 19 23:24:52 worker2 kubelet[14994]: }
+Sep 19 23:24:57 worker2 kubelet[14994]: I0919 23:24:57.357652   14994 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 19 23:25:02 worker2 kubelet[14994]: I0919 23:25:02.358704   14994 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+Sep 19 23:25:07 worker2 kubelet[14994]: I0919 23:25:07.359749   14994 kubelet.go:2510] skipping pod synchronization - [Kubenet does not have netConfig. This is most likely due to lack of PodCIDR]
+#+end_example
+
+***** Kube Proxy
+
+****** systemd unit file
+
+#+BEGIN_SRC conf :tangle /ssh:worker2.us-central1-a.EXAMPLE-99999:/tmp/kube-proxy.service :results output
+[Unit]
+Description=Kubernetes Kube Proxy
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStart=/usr/bin/kube-proxy \
+  --master=https://10.240.0.20:6443 \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --proxy-mode=iptables \
+  --v=2
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+Add to systemd
+
+#+BEGIN_SRC sh 
+sudo cp /tmp/kube-proxy.service /etc/systemd/system/kube-proxy.service
+#+END_SRC
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable kube-proxy
+sudo systemctl start kube-proxy
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+sudo systemctl status kube-proxy --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+● kube-proxy.service - Kubernetes Kube Proxy
+   Loaded: loaded (/etc/systemd/system/kube-proxy.service; enabled; vendor preset: enabled)
+   Active: active (running) since Mon 2016-09-19 23:25:33 UTC; 3s ago
+     Docs: https://github.com/GoogleCloudPlatform/kubernetes
+ Main PID: 15226 (kube-proxy)
+    Tasks: 6
+   Memory: 5.0M
+      CPU: 149ms
+   CGroup: /system.slice/kube-proxy.service
+           └─15226 /usr/bin/kube-proxy --master=https://10.240.0.20:6443 --ku...
+
+Sep 19 23:25:33 worker2 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.280998   15226 ser...d
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.290401   15226 ser....
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.325897   15226 ser....
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.338505   15226 con...8
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.339520   15226 con...2
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.339799   15226 con...0
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.344173   15226 pro...P
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.344924   15226 pro...r
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.363620   15226 pro...]
+Hint: Some lines were ellipsized, use -l to show in full.
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo journalctl -u kube-proxy -n 30 --no-pager
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+-- Logs begin at Thu 2016-09-08 01:31:39 UTC, end at Mon 2016-09-19 23:25:42 UTC. --
+Sep 19 23:25:33 worker2 systemd[1]: Started Kubernetes Kube Proxy.
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.280998   15226 server.go:155] setting OOM scores is unsupported in this build
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.290401   15226 server.go:202] Using iptables Proxier.
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.325897   15226 server.go:214] Tearing down userspace rules.
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.338505   15226 conntrack.go:40] Setting nf_conntrack_max to 32768
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.339520   15226 conntrack.go:57] Setting conntrack hashsize to 8192
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.339799   15226 conntrack.go:62] Setting nf_conntrack_tcp_timeout_established to 86400
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.344173   15226 proxier.go:440] Adding new service "default/kubernetes:https" at 10.32.0.1:443/TCP
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.344924   15226 proxier.go:674] Not syncing iptables until Services and Endpoints have been received from master
+Sep 19 23:25:33 worker2 kube-proxy[15226]: I0919 23:25:33.363620   15226 proxier.go:516] Setting endpoints for "default/kubernetes:https" to [10.240.0.20:6443]
+#+end_example

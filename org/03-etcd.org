@@ -1,0 +1,687 @@
+#+title: Bootstrapping a H/A etcd cluster
+#+property: header-args :results output code
+
+*** 3 node instances of etcd
+
+#+BEGIN_SRC sh :exports both
+gcloud compute instances list
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+NAME         ZONE           MACHINE_TYPE   PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP   STATUS
+controller0  us-central1-a  n1-standard-1               10.240.0.20  AAA.BBB.CCC.1   RUNNING
+controller1  us-central1-a  n1-standard-1               10.240.0.21  AAA.BBB.CCC.2   RUNNING
+etcd0        us-central1-a  n1-standard-1               10.240.0.10  AAA.BBB.CCC.3   RUNNING
+etcd1        us-central1-a  n1-standard-1               10.240.0.11  AAA.BBB.CCC.4   RUNNING
+etcd2        us-central1-a  n1-standard-1               10.240.0.12  AAA.BBB.CCC.5   RUNNING
+worker0      us-central1-a  n1-standard-1               10.240.0.30  AAA.BBB.CCC.6   RUNNING
+worker1      us-central1-a  n1-standard-1               10.240.0.31  AAA.BBB.CCC.7   RUNNING
+worker2      us-central1-a  n1-standard-1               10.240.0.32  AAA.BBB.CCC.8   RUNNING
+#+END_SRC
+
+*** Why
+
+- All Kubernetes component are stateless with the state being stored instead in =etcd=.
+
+- =etcd= is a database which must be treated special.
+
+**** COMMENT Unhealthy scenario example
+
+#+BEGIN_SRC sh :exports both
+etcdctl --ca-file=/etc/etcd/ca.pem cluster-health
+
+cluster may be unhealthy: failed to list members
+Error:  client: etcd cluster is unavailable or misconfigured
+error #0: dial tcp 127.0.0.1:4001: getsockopt: connection refused
+error #1: client: endpoint http://127.0.0.1:2379 exceeded header timeout
+#+END_SRC
+
+*** Provision the etcd cluster
+
+**** etcd system service template
+
+#+BEGIN_SRC conf
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name ETCD_NAME \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+  --trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \
+  --initial-advertise-peer-urls https://INTERNAL_IP:2380 \
+  --listen-peer-urls https://INTERNAL_IP:2380 \
+  --listen-client-urls https://INTERNAL_IP:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://INTERNAL_IP:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster etcd0=https://10.240.0.10:2380,etcd1=https://10.240.0.11:2380,etcd2=https://10.240.0.12:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+**** DONE etcd0
+  :properties:
+  :header-args: :dir /ssh:etcd0.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+***** prepare
+
+#+BEGIN_SRC sh :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0a brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.10/32 brd 10.240.0.10 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:a/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+Create a folder for etcd and move the TLS certificates in place:
+
+#+BEGIN_SRC sh 
+sudo mkdir -p /etc/etcd/
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+ip a
+ls
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0a brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.10/32 brd 10.240.0.10 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:a/64 scope link 
+       valid_lft forever preferred_lft forever
+ca.pem	kubernetes-key.pem  kubernetes.pem
+#+end_example
+
+#+BEGIN_SRC sh :exports both
+sudo mv ca.pem kubernetes-key.pem kubernetes.pem /etc/etcd/
+#+END_SRC
+
+***** install
+
+Download and install the etcd binaries:
+
+#+BEGIN_SRC sh
+wget https://github.com/coreos/etcd/releases/download/v3.0.1/etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+******* uncompress
+
+#+BEGIN_SRC sh :results silent
+tar -xvf etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+******* copy into path
+
+#+BEGIN_SRC sh
+sudo cp etcd-v3.0.1-linux-amd64/etcd* /usr/bin/
+#+END_SRC
+
+Create directory for etcd data:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/etcd
+#+END_SRC
+
+***** Create systemd file for it
+
+- Get the =INTERNAL_IP= from the host
+
+#+BEGIN_SRC sh :results output code :exports both
+curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+10.240.0.10
+#+END_SRC
+
+- Get the hostname too
+
+#+BEGIN_SRC sh :exports both
+hostname -s
+#+END_SRC
+
+#+RESULTS:
+: etcd0
+
+****** Replace in the template
+
+#+BEGIN_SRC emacs-lisp
+(replace-string "INTERNAL_IP" "10.240.0.10")
+#+END_SRC
+
+#+BEGIN_SRC sh :tangle /ssh:etcd0.us-central1-a.EXAMPLE-99999:/tmp/etcd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd0 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+  --trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \
+  --initial-advertise-peer-urls https://10.240.0.10:2380 \
+  --listen-peer-urls https://10.240.0.10:2380 \
+  --listen-client-urls https://10.240.0.10:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://10.240.0.10:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster etcd0=https://10.240.0.10:2380,etcd1=https://10.240.0.11:2380,etcd2=https://10.240.0.12:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+****** Copy the template
+
+#+BEGIN_SRC sh :exports both
+sudo cp /tmp/etcd.service /etc/systemd/system/
+ls /etc/systemd/system/
+head /etc/systemd/system/etcd.service
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+cloud-init.target.wants  multi-user.target.wants      sshd.service.wants
+default.target.wants	 network-online.target.wants  sysinit.target.wants
+etcd.service		 paths.target.wants	      syslog.service
+getty.target.wants	 shutdown.target.wants	      timers.target.wants
+graphical.target.wants	 sockets.target.wants
+iscsi.service		 sshd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd0 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+#+end_example
+
+***** Start etcd
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable etcd
+sudo systemctl start etcd
+#+END_SRC
+
+***** confirm the logs
+
+#+BEGIN_SRC sh :exports both
+tail  /var/log/syslog 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Sep  8 06:36:50 ubuntu etcd[27438]: f98dc20bce6225a0 became candidate at term 14
+Sep  8 06:36:50 ubuntu etcd[27438]: f98dc20bce6225a0 received vote from f98dc20bce6225a0 at term 14
+Sep  8 06:36:50 ubuntu etcd[27438]: f98dc20bce6225a0 [logterm: 1, index: 3] sent vote request to 3a57933972cb5131 at term 14
+Sep  8 06:36:50 ubuntu etcd[27438]: f98dc20bce6225a0 [logterm: 1, index: 3] sent vote request to ffed16798470cab5 at term 14
+Sep  8 06:36:52 ubuntu etcd[27438]: publish error: etcdserver: request timed out
+Sep  8 06:36:52 ubuntu etcd[27438]: f98dc20bce6225a0 is starting a new election at term 14
+Sep  8 06:36:52 ubuntu etcd[27438]: f98dc20bce6225a0 became candidate at term 15
+Sep  8 06:36:52 ubuntu etcd[27438]: f98dc20bce6225a0 received vote from f98dc20bce6225a0 at term 15
+Sep  8 06:36:52 ubuntu etcd[27438]: f98dc20bce6225a0 [logterm: 1, index: 3] sent vote request to ffed16798470cab5 at term 15
+Sep  8 06:36:52 ubuntu etcd[27438]: f98dc20bce6225a0 [logterm: 1, index: 3] sent vote request to 3a57933972cb5131 at term 15
+#+end_example
+
+**** DONE etcd1
+  :properties:
+  :header-args: :dir /ssh:etcd1.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+***** prepare
+
+#+BEGIN_SRC sh  :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0b brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.11/32 brd 10.240.0.11 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:b/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+Create a folder for etcd and move the TLS certificates in place:
+
+#+BEGIN_SRC sh 
+sudo mkdir -p /etc/etcd/
+#+END_SRC
+
+#+BEGIN_SRC sh :exports both
+ip a
+ls
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0b brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.11/32 brd 10.240.0.11 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:b/64 scope link 
+       valid_lft forever preferred_lft forever
+ca.pem	kubernetes-key.pem  kubernetes.pem
+#+end_example
+
+#+BEGIN_SRC sh
+sudo cp ca.pem kubernetes-key.pem kubernetes.pem /etc/etcd/
+#+END_SRC
+
+***** install
+
+Download and install the etcd binaries:
+
+#+BEGIN_SRC sh
+wget https://github.com/coreos/etcd/releases/download/v3.0.1/etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+#+RESULTS:
+
+******* uncompress
+
+#+BEGIN_SRC sh :results silent :exports both
+tar -xvf etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+******* copy into path
+
+#+BEGIN_SRC sh
+sudo cp etcd-v3.0.1-linux-amd64/etcd* /usr/bin/
+#+END_SRC
+
+Create directory for etcd data:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/etcd
+#+END_SRC
+
+***** Create systemd file for it
+
+- Get the =INTERNAL_IP= from the host
+
+#+BEGIN_SRC sh :results output code :exports both
+curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+10.240.0.11
+#+END_SRC
+
+- Get the hostname too
+
+#+BEGIN_SRC sh :exports both
+hostname -s
+#+END_SRC
+
+#+RESULTS:
+: etcd1
+
+****** Replace in the template
+
+#+BEGIN_SRC sh :tangle /ssh:etcd1.us-central1-a.EXAMPLE-99999:/tmp/etcd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd1 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+  --trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \
+  --initial-advertise-peer-urls https://10.240.0.11:2380 \
+  --listen-peer-urls https://10.240.0.11:2380 \
+  --listen-client-urls https://10.240.0.11:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://10.240.0.11:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster etcd0=https://10.240.0.10:2380,etcd1=https://10.240.0.11:2380,etcd2=https://10.240.0.12:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+#+RESULTS:
+
+****** Copy the template
+
+#+BEGIN_SRC sh :exports both
+sudo cp /tmp/etcd.service /etc/systemd/system/
+ls /etc/systemd/system/
+head /etc/systemd/system/etcd.service
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+cloud-init.target.wants  multi-user.target.wants      sshd.service.wants
+default.target.wants	 network-online.target.wants  sysinit.target.wants
+etcd.service		 paths.target.wants	      syslog.service
+getty.target.wants	 shutdown.target.wants	      timers.target.wants
+graphical.target.wants	 sockets.target.wants
+iscsi.service		 sshd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd1 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+#+end_example
+
+***** Start etcd
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable etcd
+sudo systemctl start etcd
+#+END_SRC
+
+***** confirm the logs
+
+#+BEGIN_SRC sh :exports both
+tail  /var/log/syslog 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Sep  8 20:59:34 ubuntu etcd[9719]: raft.node: ffed16798470cab5 elected leader f98dc20bce6225a0 at term 35719
+Sep  8 20:59:34 ubuntu etcd[9719]: published {Name:etcd1 ClientURLs:[https://10.240.0.11:2379]} to cluster 3e7cc799faffb625
+Sep  8 20:59:34 ubuntu etcd[9719]: ready to serve client requests
+Sep  8 20:59:34 ubuntu etcd[9719]: serving insecure client requests on 127.0.0.1:2379, this is strongly discouraged!
+Sep  8 20:59:34 ubuntu etcd[9719]: failed to notify systemd for readiness: No socket
+Sep  8 20:59:34 ubuntu etcd[9719]: forgot to set Type=notify in systemd service file?
+Sep  8 20:59:34 ubuntu etcd[9719]: ready to serve client requests
+Sep  8 20:59:34 ubuntu etcd[9719]: serving client requests on 10.240.0.11:2379
+Sep  8 20:59:34 ubuntu etcd[9719]: set the initial cluster version to 2.3
+Sep  8 20:59:34 ubuntu etcd[9719]: enabled capabilities for version 2.3
+#+end_example
+
+**** DONE etcd2
+  :properties:
+  :header-args: :dir /ssh:etcd2.us-central1-a.EXAMPLE-99999: :results output
+  :end:
+
+***** prepare
+
+#+BEGIN_SRC sh  :exports both
+ip a
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0c brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.12/32 brd 10.240.0.12 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:c/64 scope link 
+       valid_lft forever preferred_lft forever
+#+end_example
+
+Create a folder for etcd and move the TLS certificates in place:
+
+#+BEGIN_SRC sh 
+sudo mkdir -p /etc/etcd/
+#+END_SRC
+
+#+BEGIN_SRC sh  :exports both
+ip a
+ls
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 42:01:0a:f0:00:0a brd ff:ff:ff:ff:ff:ff
+    inet 10.240.0.10/32 brd 10.240.0.10 scope global ens4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::4001:aff:fef0:a/64 scope link 
+       valid_lft forever preferred_lft forever
+ca.pem	kubernetes-key.pem  kubernetes.pem
+#+end_example
+
+#+BEGIN_SRC sh
+for t in ca.pem kubernetes-key.pem kubernetes.pem; do
+  sudo cp $t /etc/etcd/
+done
+#+END_SRC
+
+***** install
+
+Download and install the etcd binaries:
+
+#+BEGIN_SRC sh
+wget https://github.com/coreos/etcd/releases/download/v3.0.1/etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+******* uncompress
+
+#+BEGIN_SRC sh
+tar -xvf etcd-v3.0.1-linux-amd64.tar.gz
+#+END_SRC
+
+******* copy into path
+
+Copy both =etcd= and =etcdctl= to the path:
+
+#+BEGIN_SRC sh
+sudo cp etcd-v3.0.1-linux-amd64/etcd* /usr/bin/
+ls -la /usr/bin/etcd*
+#+END_SRC
+
+Create directory for etcd data:
+
+#+BEGIN_SRC sh
+sudo mkdir -p /var/lib/etcd
+#+END_SRC
+
+***** Create systemd file for it
+
+# metadata.google.internal is 169.254.169.254
+
+- Get the =INTERNAL_IP= from the host
+
+#+BEGIN_SRC sh :results output code :exports both
+curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+10.240.0.12
+#+END_SRC
+
+- Get the hostname too
+
+#+BEGIN_SRC sh :exports both
+hostname -s
+#+END_SRC
+
+#+RESULTS:
+: etcd2
+
+****** Replace in the template
+
+#+BEGIN_SRC emacs-lisp
+(replace-string "10.240.0.10" "10.240.0.12")
+(replace-string "etcd0" "etcd2")
+#+END_SRC
+
+#+BEGIN_SRC sh :tangle /ssh:etcd2.us-central1-a.EXAMPLE-99999:/tmp/etcd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd2 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+  --trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \
+  --initial-advertise-peer-urls https://10.240.0.12:2380 \
+  --listen-peer-urls https://10.240.0.12:2380 \
+  --listen-client-urls https://10.240.0.12:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://10.240.0.12:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster etcd0=https://10.240.0.10:2380,etcd1=https://10.240.0.11:2380,etcd2=https://10.240.0.12:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+#+END_SRC
+
+****** Copy the template
+
+#+BEGIN_SRC sh :exports both
+sudo cp /tmp/etcd.service /etc/systemd/system/
+ls /etc/systemd/system/
+head /etc/systemd/system/etcd.service
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+cloud-init.target.wants  multi-user.target.wants      sshd.service.wants
+default.target.wants	 network-online.target.wants  sysinit.target.wants
+etcd.service		 paths.target.wants	      syslog.service
+getty.target.wants	 shutdown.target.wants	      timers.target.wants
+graphical.target.wants	 sockets.target.wants
+iscsi.service		 sshd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/bin/etcd --name etcd2 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+#+end_example
+
+***** Start etcd
+
+#+BEGIN_SRC sh
+sudo systemctl daemon-reload
+sudo systemctl enable etcd
+sudo systemctl start etcd
+#+END_SRC
+
+***** confirm the logs
+
+#+BEGIN_SRC sh :exports both
+tail  /var/log/syslog 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Sep  8 21:16:25 ubuntu etcd[10831]: published {Name:etcd2 ClientURLs:[https://10.240.0.12:2379]} to cluster 3e7cc799faffb625
+Sep  8 21:16:25 ubuntu etcd[10831]: ready to serve client requests
+Sep  8 21:16:25 ubuntu etcd[10831]: serving insecure client requests on 127.0.0.1:2379, this is strongly discouraged!
+Sep  8 21:16:25 ubuntu etcd[10831]: failed to notify systemd for readiness: No socket
+Sep  8 21:16:25 ubuntu etcd[10831]: forgot to set Type=notify in systemd service file?
+Sep  8 21:16:25 ubuntu etcd[10831]: ready to serve client requests
+Sep  8 21:16:25 ubuntu etcd[10831]: serving client requests on 10.240.0.12:2379
+Sep  8 21:16:26 ubuntu etcd[10831]: enabled capabilities for version 2.3
+Sep  8 21:16:26 ubuntu etcd[10831]: updated the cluster version from 2.3 to 3.0
+Sep  8 21:16:27 ubuntu etcd[10831]: enabled capabilities for version 3.0
+#+end_example
+
+
+***** Confirm the cluster is healthy
+
+#+BEGIN_SRC sh :results output code :exports both
+etcdctl --ca-file=/etc/etcd/ca.pem cluster-health
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_SRC sh
+member 3a57933972cb5131 is healthy: got healthy result from https://10.240.0.12:2379
+member f98dc20bce6225a0 is healthy: got healthy result from https://10.240.0.10:2379
+member ffed16798470cab5 is healthy: got healthy result from https://10.240.0.11:2379
+cluster is healthy
+#+END_SRC

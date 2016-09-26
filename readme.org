@@ -13,7 +13,7 @@ Currently covered:
 - [[./org/06-kubectl.org][Configuring kubectl]]
 - [[./org/07-networking.org][Configuring the network]]
 - [[./org/08-dns-addon.org][Configuring the DNS add on]]
-- [[./org/09-smoke-test.org][Basic smoke test with nginx app]]
+- [[./org/09-smoke-test.org][Basic smoke tests]]
 
 Check [[setup.org][setup.org]] for requirements, then on each document
 call =M-x org-babel-tangle= for tangling and executing each one of the

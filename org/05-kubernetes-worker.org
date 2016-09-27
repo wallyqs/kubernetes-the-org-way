@@ -68,14 +68,14 @@ sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
 
 ***** Docker
 
-Kubernetes should be compatible with the Docker 1.9.x - 1.11.x:
+Kubernetes should be compatible with the Docker 1.9.x - 1.12.x:
 
 #+BEGIN_SRC sh
-curl -O -L https://get.docker.com/builds/Linux/x86_64/docker-1.11.2.tgz
+curl -O -L https://get.docker.com/builds/Linux/x86_64/docker-1.12.1.tgz
 #+END_SRC
 
 #+BEGIN_SRC sh
-tar -xvf docker-1.11.2.tgz
+tar -xvf docker-1.12.1.tgz
 #+END_SRC
 
 Install in =PATH=
@@ -154,11 +154,11 @@ sudo mkdir -p /opt/cni
 #+END_SRC
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz
 #+END_SRC
 
 #+BEGIN_SRC sh :results silent
-sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+sudo tar -xvf cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz -C /opt/cni
 #+END_SRC
 
 This tarball contains the following binaries, notably =flannel=
@@ -182,9 +182,9 @@ x bin/dhcp
 The =kube-proxy=, =kubelet= need to be colocated in this box as well.
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubelet
 #+END_SRC
 
 Install the binaries:
@@ -599,11 +599,11 @@ sudo mkdir -p /opt/cni
 #+END_SRC
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz
 #+END_SRC
 
 #+BEGIN_SRC sh :results silent
-sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+sudo tar -xvf cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz -C /opt/cni
 #+END_SRC
 
 This tarball contains the following binaries, notably =flannel=
@@ -627,9 +627,9 @@ x bin/dhcp
 The =kube-proxy=, =kubelet= need to be colocated in this box as well.
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubelet
 #+END_SRC
 
 Install the binaries:
@@ -986,11 +986,11 @@ sudo mkdir -p /opt/cni
 #+END_SRC
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz
+curl -O -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz
 #+END_SRC
 
 #+BEGIN_SRC sh :results silent
-sudo tar -xvf cni-c864f0e1ea73719b8f4582402b0847064f9883b0.tar.gz -C /opt/cni
+sudo tar -xvf cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz -C /opt/cni
 #+END_SRC
 
 This tarball contains the following binaries, notably =flannel=
@@ -1014,9 +1014,9 @@ x bin/dhcp
 The =kube-proxy=, =kubelet= need to be colocated in this box as well.
 
 #+BEGIN_SRC sh
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubectl
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kube-proxy
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/linux/amd64/kubelet
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kube-proxy
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/linux/amd64/kubelet
 #+END_SRC
 
 Install the binaries:

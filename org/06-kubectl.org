@@ -3,7 +3,7 @@
 **** For OS X
 
 #+BEGIN_SRC sh :dir files :results output
-curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.3.6/bin/darwin/amd64/kubectl
+curl -O -L https://storage.googleapis.com/kubernetes-release/release/v1.4.0/bin/darwin/amd64/kubectl
 chmod +x kubectl
 sudo mv kubectl /usr/local/bin/kubectl
 kubectl

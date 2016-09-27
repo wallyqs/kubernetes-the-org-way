@@ -404,3 +404,172 @@ world
 MSG hello 90 5
 world
 #+END_SRC
+
+** API Server endpoint
+
+Try creating an insecure =Endpoint= to the API Server paired with a
+=Service= analogous the =kubernetes= service only difference is that
+this pairing allows talking on the insecure port the API servers.
+
+*** Endpoint
+
+**** COMMENT JSON
+
+#+BEGIN_SRC js :tangle files/endpoints/api-server.json
+{
+    "kind": "Endpoints",
+    "apiVersion": "v1",
+    "metadata": {
+        "namespace": "kube-system",
+        "name": "kubernetes-api-server"
+    },
+    "subsets": [
+        {
+            "addresses": [
+                { "ip": "10.240.0.20" }
+            ],
+            "ports": [
+                { "port": 8080 }
+            ]
+        }
+    ]
+}
+#+END_SRC
+
+**** YAML
+
+#+BEGIN_SRC yaml :tangle files/endpoints/api-server.yaml :mkdirp true
+apiVersion: v1
+kind: Endpoints
+metadata:
+  namespace: kube-system
+  name: kubernetes-api-server
+subsets:
+  - addresses:
+    - ip: "10.240.0.20"
+    ports:
+    - port: 8080
+#+END_SRC
+
+*** Service
+
+**** COMMENT JSON
+
+#+BEGIN_SRC js :tangle files/services/api-server.json
+{
+    "kind": "Service",
+    "apiVersion": "v1",
+    "metadata": {
+        "namespace": "kube-system",
+        "name": "kubernetes-api-server"
+    },
+    "spec": {
+        "ports": [
+            {
+                "protocol": "TCP",
+                "port": 8080,
+                "targetPort": 8080
+            }
+        ]
+    }
+}
+#+END_SRC
+
+**** YAML
+
+#+BEGIN_SRC yaml :tangle files/services/api-server.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: kube-system
+  name: kubernetes-api-server
+spec:
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+#+END_SRC
+
+*** Create the endpoint and service
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl create -f files/endpoints/api-server.yaml
+#+END_SRC
+
+#+RESULTS:
+: endpoints "kubernetes-api-server" created
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl create -f files/services/api-server.yaml
+#+END_SRC
+
+#+RESULTS:
+: service "kubernetes-api-server" created
+
+*** Confirm
+
+#+BEGIN_SRC sh :results output :exports both
+kubectl get pods,svc,deployments,nodes,endpoints -o wide --namespace kube-system
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+NAME                           READY                                                   STATUS        RESTARTS        AGE         IP           NODE
+kube-dns-v19-965658604-11x0e   3/3                                                     Running       0               4d          10.200.0.2   worker0
+kube-dns-v19-965658604-pk7d5   3/3                                                     Running       0               1d          10.200.1.5   worker1
+kube-dns-v19-965658604-qewo9   3/3                                                     Running       0               4d          10.200.2.2   worker2
+NAME                           CLUSTER-IP                                              EXTERNAL-IP   PORT(S)         AGE         SELECTOR
+kube-dns                       10.32.0.10                                              <none>        53/UDP,53/TCP   4d          k8s-app=kube-dns
+kubernetes-api-server          10.32.0.95                                              <none>        8080/TCP        2m          <none>
+NAME                           DESIRED                                                 CURRENT       UP-TO-DATE      AVAILABLE   AGE
+kube-dns-v19                   3                                                       3             3               3           4d
+NAME                           STATUS                                                  AGE
+worker0                        Ready                                                   13d
+worker1                        Ready                                                   7d
+worker2                        Ready                                                   7d
+NAME                           ENDPOINTS                                               AGE
+kube-controller-manager        <none>                                                  13d
+kube-dns                       10.200.0.2:53,10.200.1.5:53,10.200.2.2:53 + 3 more...   4d
+kube-scheduler                 <none>                                                  13d
+kubernetes-api-server          10.240.0.20:8080                                        2m
+#+end_example
+
+Then from a =busybox= container for debugging we can connect to it too:
+
+#+BEGIN_SRC sh
+wget -O - 10.32.0.95:8080
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+wget -O - 10.32.0.95:8080
+Connecting to 10.32.0.95:8080 (10.32.0.95:8080)
+
+{
+  "paths": [
+    "/api",
+    "/api/v1",
+    "/apis",
+    "/apis/apps",
+    "/apis/apps/v1alpha1",
+    "/apis/autoscaling",
+    "/apis/autoscaling/v1",
+    "/apis/batch",
+    "/apis/batch/v1",
+    "/apis/batch/v2alpha1",
+    "/apis/extensions",
+    "/apis/extensions/v1beta1",
+    "/apis/policy",
+    "/apis/policy/v1alpha1",
+    "/apis/rbac.authorization.k8s.io",
+    "/apis/rbac.authorization.k8s.io/v1alpha1",
+    "/healthz",
+    "/healthz/ping",
+    "/logs/",
+    "/metrics",
+    "/swagger-ui/",
+    "/swaggerapi/",
+    "/ui/",
+    "/version"
+  ]
+#+END_EXAMPLE
+

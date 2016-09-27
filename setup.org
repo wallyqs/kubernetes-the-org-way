@@ -26,21 +26,22 @@ tar -xvf google-cloud-sdk-125.0.0-darwin-x86_64.tar.gz
 
 https://console.cloud.google.com/home/dashboard?project=EXAMPLE-99999
 
+#+BEGIN_SRC sh
+ ./src/google-cloud-sdk/bin/gcloud config set project kubernetes-the-org-way
+#+END_SRC
+
 *** gcloud cli
 
 Enable the API
 
 #+BEGIN_SRC sh
- ./google-cloud-sdk/bin/gcloud compute instances list
-ERROR: (gcloud.compute.instances.list) Some requests did not succeed:
-
- - Access Not Configured. Compute Engine API has not been used in project _____ before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/compute_component/overview?project=_________ then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+./src/google-cloud-sdk/bin/gcloud compute instances list
 #+END_SRC
 
 *** Setup SSH for Org Babel
 
 #+BEGIN_SRC sh
-gcloud compute config-ssh
+./src/google-cloud-sdk/bin/gcloud compute config-ssh
 #+END_SRC
 
 *** How to SSH
